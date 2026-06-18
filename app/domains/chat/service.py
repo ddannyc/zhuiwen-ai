@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.domains.chat.agent import TOOL_LABELS, build_chat_agent
 from app.domains.chat.prompts import (
     ANALYSIS_PROMPTS,
@@ -30,9 +31,9 @@ def _iso(dt) -> str:
 
 
 class ChatService:
-    def __init__(self, session: AsyncSession, model: str = "gpt-4o-mini"):
+    def __init__(self, session: AsyncSession, model: str | None = None):
         self.session = session
-        self.model = model
+        self.model = model or get_settings().chat_model
         self.repo = ChatRepository(session)
 
     # ---- 会话管理 ----
@@ -85,11 +86,14 @@ class ChatService:
             if title:
                 await self.repo.update_conversation_title(conversation_id, title)
 
-        return {
-            "reply": final.get("reply", ""),
-            "action": final.get("action") or {"type": "answer"},
-            "tools_used": final.get("tools_used", []),
-        }
+        action = final.get("action") or {"type": "answer"}
+        reply = final.get("reply", "")
+        # 合规硬保障：规则检索为空时，确定性覆盖回复——杜绝模型凭记忆编造平台规则
+        # （弱模型即便拿到"未找到"也可能幻觉，prompt 约束不可靠，故在此强制兜底）。
+        if action.get("type") == "rules_search" and action.get("empty"):
+            reply = "未找到相关平台规则，请以平台最新官方公告为准。（知识库无匹配，不臆测。）"
+
+        return {"reply": reply, "action": action, "tools_used": final.get("tools_used", [])}
 
     async def _gen_title(self, message: str) -> str:
         """首条消息生成简短标题。失败不抛（标题非关键路径），返回空串跳过。"""

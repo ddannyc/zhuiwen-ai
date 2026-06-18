@@ -24,9 +24,12 @@ async def test_platform_isolation_amazon_empty():
     assert await svc.search("玩具类目能卖含磁铁的吗", platform="amazon") == []
 
 
-async def test_site_isolation_us_empty():
-    # ozon 数据是 GLOBAL/RU，查 US 站应 0 命中
-    assert await svc.search("佣金费用", platform="ozon", site="US") == []
+async def test_global_rules_match_any_site():
+    # GLOBAL 规则适用所有站点：查 ozon + site=US 仍命中 GLOBAL 数据（模型常猜错 site，
+    # 不放宽会假性 0 命中）。隔离靠 platform（见下条 amazon 测试），不靠 site 卡死。
+    hits = await svc.search("佣金费用", platform="ozon", site="US")
+    assert hits
+    assert all(h["site"] == "GLOBAL" for h in hits)
 
 
 async def test_fees_query_hits_fee_domain():

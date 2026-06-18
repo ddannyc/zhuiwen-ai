@@ -111,7 +111,9 @@ class RulesKbService:
             rows = [r for r in rows if str(r.get("platform", "")).lower() == pf]
         if site:
             st = site.strip().lower()
-            rows = [r for r in rows if str(r.get("site", "")).lower() == st]
+            # GLOBAL 规则适用所有站点，故匹配任意 site 查询；否则按 site 精确过滤。
+            # （模型常把 Ozon 猜成 site=RU，而数据是 GLOBAL —— 不放宽会假性 0 命中。）
+            rows = [r for r in rows if str(r.get("site", "")).lower() in (st, "global")]
 
         # 2) 词法打分 + 取 top-N（score>0 才算命中）
         qg = _bigrams(query)

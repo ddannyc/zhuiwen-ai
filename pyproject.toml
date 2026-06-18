@@ -24,6 +24,7 @@ dependencies = [
     "temporalio>=1.6",
     "alembic>=1.18.4",
     "psycopg[binary]>=3.3.4",
+    "litellm>=1.89.2",
 ]
 
 [dependency-groups]
