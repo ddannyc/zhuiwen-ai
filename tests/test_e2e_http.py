@@ -111,6 +111,26 @@ async def test_full_chat_flow_rules_search(mock_llm):
         assert msgs[1]["action"]["type"] == "rules_search"
 
 
+async def test_idor_same_tenant_messages_blocked(mock_llm):
+    # alice 建会话并发消息；bob（同租户）拿到 id 也不能读/写 → 404（不泄露存在性）。
+    async with _client() as c:
+        ta = await _login(c, "alice")
+        ha = {"Authorization": f"Bearer {ta}"}
+        conv = (await c.post("/chat/conversations", json={"title": "私有"}, headers=ha)).json()
+        cid = conv["id"]
+        await c.post(f"/chat/conversations/{cid}/messages", json={"message": "你好"}, headers=ha)
+
+        tb = await _login(c, "bob")
+        hb = {"Authorization": f"Bearer {tb}"}
+        # bob 读 alice 会话消息 → 404
+        assert (await c.get(f"/chat/conversations/{cid}/messages", headers=hb)).status_code == 404
+        # bob 往 alice 会话发消息 → 404
+        r = await c.post(f"/chat/conversations/{cid}/messages", json={"message": "侵入"}, headers=hb)
+        assert r.status_code == 404
+        # alice 本人仍可读
+        assert (await c.get(f"/chat/conversations/{cid}/messages", headers=ha)).status_code == 200
+
+
 async def test_ownership_isolation_same_tenant(mock_llm):
     # alice / bob 同租户。alice 建会话，bob 列表里看不到（按 user_id 归属过滤）。
     async with _client() as c:

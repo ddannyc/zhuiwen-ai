@@ -69,15 +69,15 @@ export function ChatPane({
     if (!conversationId) onConversationCreated(id);
   }
 
+  const isEmpty = messages.length === 0 && !streaming && !pendingUser;
+
   return (
     <div className="flex h-full flex-1 flex-col bg-slate-50">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
+      {isEmpty ? (
+        <EmptyState onPick={send} />
+      ) : (
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto flex max-w-2xl flex-col gap-4">
-          {messages.length === 0 && !streaming && (
-            <p className="mt-20 text-center text-sm text-slate-400">
-              开始对话 — 试试「列出采集箱前10个」或「亚马逊美国站玩具含磁铁能卖吗」
-            </p>
-          )}
           {messages.map((m) => (
             <Bubble key={m.id} role={m.role}>
               <MessageRenderer content={m.content} action={m.action} />
@@ -99,8 +99,43 @@ export function ChatPane({
             </Bubble>
           )}
         </div>
-      </div>
+        </div>
+      )}
       <Composer disabled={!!streaming} onSend={send} />
+    </div>
+  );
+}
+
+const SUGGESTIONS = [
+  "美国市场蓝海选品建议",
+  "列出采集箱前 10 个",
+  "亚马逊美国站玩具含磁铁能卖吗",
+  "Ozon 平台佣金怎么算",
+];
+
+function EmptyState({ onPick }: { onPick: (text: string) => void }) {
+  return (
+    <div className="flex flex-1 items-center justify-center px-4">
+      <div className="w-full max-w-2xl text-center">
+        <div className="mb-3 text-4xl">🐒</div>
+        <h2 className="text-lg font-semibold text-slate-800">
+          飞猴 · 跨境电商智能体
+        </h2>
+        <p className="mt-1 text-sm text-slate-400">
+          选品、竞品、Listing、定价、平台规则 — 问我或下指令
+        </p>
+        <div className="mt-6 flex flex-wrap justify-center gap-2">
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s}
+              onClick={() => onPick(s)}
+              className="rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-sm text-slate-600 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-800"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -50,6 +50,15 @@ class ChatService:
             "title": c.title, "created_at": _iso(c.created_at),
         } for c in convs]
 
+    async def user_owns_conversation(self, user_id: str, conversation_id: str) -> bool:
+        """归属校验：会话必须属于该 user_id。RLS 只隔离 tenant，同租户不同员工
+        互不可见对方会话靠这里把关（计划假设 6）。非法 id / 不存在 → False。"""
+        try:
+            conv = await self.repo.get_conversation(conversation_id)
+        except (ValueError, TypeError):
+            return False
+        return conv is not None and str(conv.user_id) == str(user_id)
+
     async def list_messages(self, conversation_id: str, limit: int = 50) -> list[dict[str, Any]]:
         msgs = await self.repo.list_messages(conversation_id, limit)
         return [{

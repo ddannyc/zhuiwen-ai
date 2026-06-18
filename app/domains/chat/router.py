@@ -8,7 +8,7 @@ tenant_id 不在这里碰，RLS 自动隔离。
 import json
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,8 +37,14 @@ async def create_conversation(
 
 
 @router.get("/conversations/{conversation_id}/messages")
-async def list_messages(conversation_id: str, db: AsyncSession = Depends(get_db)):
-    return {"messages": await ChatService(db).list_messages(conversation_id)}
+async def list_messages(
+    conversation_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    svc = ChatService(db)
+    # 归属校验：非本人会话一律 404（不泄露存在性）。RLS 只挡跨租户，同租户归属靠这里。
+    if not await svc.user_owns_conversation(request.state.user_id, conversation_id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"messages": await svc.list_messages(conversation_id)}
 
 
 def _sse(event: str, data) -> str:
@@ -47,11 +53,17 @@ def _sse(event: str, data) -> str:
 
 @router.post("/conversations/{conversation_id}/messages")
 async def send_message(
-    conversation_id: str, body: SendMessageRequest, db: AsyncSession = Depends(get_db)
+    conversation_id: str, body: SendMessageRequest, request: Request,
+    db: AsyncSession = Depends(get_db),
 ):
     """主入口：自然语言 → 路由 → 执行 → SSE 事件流。"""
+    svc = ChatService(db)
+    # 归属校验：非本人会话一律 404（防止往他人会话写消息/触发 agent）。
+    if not await svc.user_owns_conversation(request.state.user_id, conversation_id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+
     async def gen() -> AsyncIterator[str]:
-        async for ev in ChatService(db).converse_stream(conversation_id, body.message):
+        async for ev in svc.converse_stream(conversation_id, body.message):
             yield _sse(ev["event"], ev["data"])
 
     return StreamingResponse(gen(), media_type="text/event-stream")

@@ -63,9 +63,12 @@ export function ConversationSidebar({
             切换/登出
           </button>
         </div>
-        <span className="text-xs text-slate-400">
-          用户 {session?.user_id}
-        </span>
+        <div className="flex items-center gap-1.5 text-xs text-slate-400">
+          <span className="shrink-0">用户</span>
+          <span className="truncate font-mono" title={session?.user_id}>
+            {session?.user_id}
+          </span>
+        </div>
       </div>
     </aside>
   );
