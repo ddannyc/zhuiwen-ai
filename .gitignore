@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+*.local
+.vite/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude local settings
+.claude/settings.local.json
+
+# Frontend dev screenshots
+web/.shot-*.png
