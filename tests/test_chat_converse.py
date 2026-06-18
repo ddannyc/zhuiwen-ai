@@ -49,9 +49,11 @@ def _final(text):
 def captured(monkeypatch):
     calls: list[list[dict]] = []
     responses: list[dict] = []
+    choices: list = []  # 每次调用的 tool_choice（验合规召回闸强制）
 
-    async def fake_cwt(messages, tools, model="x", **kw):
+    async def fake_cwt(messages, tools, model="x", tool_choice=None, **kw):
         calls.append([dict(m) for m in messages])
+        choices.append(tool_choice)
         return responses[len(calls) - 1]
 
     async def fake_chat(messages, model="x", **kw):  # _gen_title 用，避免真打网络
@@ -60,7 +62,7 @@ def captured(monkeypatch):
     monkeypatch.setattr("app.domains.chat.agent.chat_with_tools", fake_cwt)
     monkeypatch.setattr(service_mod, "chat", fake_chat)
     monkeypatch.setattr(service_mod, "ChatRepository", FakeRepo)
-    return types.SimpleNamespace(calls=calls, responses=responses)
+    return types.SimpleNamespace(calls=calls, responses=responses, choices=choices)
 
 
 def _service():
@@ -112,6 +114,40 @@ async def test_converse_collect_products_job_id(captured):
     out = await _service().converse("conv-1", "按马来西亚蓝海自动采集每词20个")
     assert out["action"]["type"] == "collect_products"
     assert out["action"]["job_id"]
+
+
+async def test_converse_scrubs_leaked_tool_plan(captured):
+    # 模型把内部工具名/参数/调用计划当回复吐出 → 必须被兜底替换，不泄露给用户。
+    captured.responses.append(_final(
+        '请立即调用 rules_search 工具，"query": "玩具 磁铁 认证"，是否需要我帮你发起该查询？'))
+    out = await _service().converse("conv-1", "玩具磁铁能卖吗")
+    assert "rules_search" not in out["reply"]
+    assert '"query"' not in out["reply"]
+    assert "发起该查询" not in out["reply"]
+    assert "抱歉" in out["reply"]
+
+
+async def test_compliance_query_forces_rules_search(captured):
+    # 合规召回闸：含合规信号的问题，首轮强制 tool_choice=rules_search（不让模型漏路由）。
+    captured.responses.append(_tool_call("rules_search", {"query": "促销规则", "platform": "ozon"}))
+    captured.responses.append(_final("依据知识库……"))
+    await _service().converse("conv-1", "ozon 促销有什么规则要注意")
+    assert captured.choices[0] == {"type": "function", "function": {"name": "rules_search"}}
+
+
+async def test_false_citation_scrubbed(captured):
+    # 假引用闸：模型没真检索（action=answer）却声称"官方规则库" → 替换为安全话术。
+    captured.responses.append(_final("根据 Ozon 官方规则库，促销折扣不得低于 85%。"))
+    out = await _service().converse("conv-1", "随便聊聊天气")  # 无合规词 → 不强制
+    assert out["action"] == {"type": "answer"}
+    assert "官方规则库" not in out["reply"]
+    assert "未能从平台规则库取证" in out["reply"]
+
+
+async def test_converse_clean_reply_not_scrubbed(captured):
+    captured.responses.append(_final("美国市场宠物用品蓝海明显，建议聚焦智能喂食器。"))
+    out = await _service().converse("conv-1", "选品建议")
+    assert out["reply"] == "美国市场宠物用品蓝海明显，建议聚焦智能喂食器。"
 
 
 async def test_converse_plain_answer(captured):

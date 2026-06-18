@@ -33,13 +33,15 @@ async def chat(messages: list[dict], model: str | None = None, **kwargs) -> str:
 
 
 async def chat_with_tools(
-    messages: list[dict], tools: list[dict], model: str | None = None, **kwargs
+    messages: list[dict], tools: list[dict], model: str | None = None,
+    tool_choice: dict | str | None = None, **kwargs
 ) -> dict:
     """带工具的对话。返回完整 message（含 tool_calls）的 dict，供 chat 域 agent
     在 LangGraph 节点内手动跑工具循环。LiteLLM 已把各 provider 的工具调用归一为
-    OpenAI 格式。"""
+    OpenAI 格式。tool_choice 可强制调用指定工具（合规召回闸用）。"""
+    extra = {"tool_choice": tool_choice} if tool_choice else {}
     resp = await litellm.acompletion(
-        messages=messages, tools=tools, **_params(model), **kwargs
+        messages=messages, tools=tools, **extra, **_params(model), **kwargs
     )
     msg = resp.choices[0].message
     # litellm 返回 pydantic Message → 转 dict：agent 用 .get() 访问，且要回灌进 messages

@@ -110,6 +110,7 @@ class ChatState(TypedDict):
     tools_used: list[str]                # 本轮调用过的工具名（SSE tool_running 用）
     reply: str
     rounds: int
+    force_tool: Optional[str]            # 首轮强制调用的工具名（合规召回闸），无则模型自选
 
 
 def build_chat_agent(session: AsyncSession, model: str = "gpt-4o-mini"):
@@ -118,7 +119,13 @@ def build_chat_agent(session: AsyncSession, model: str = "gpt-4o-mini"):
     tool_impls = _make_tool_impls(box, rules, model)
 
     async def route(state: ChatState) -> ChatState:
-        msg = await chat_with_tools(state["messages"], tools=TOOLS, model=model)
+        # 合规召回闸：首轮强制调用指定工具（如 rules_search），不让模型漏路由。
+        tool_choice = None
+        if state.get("force_tool") and state.get("rounds", 0) == 0:
+            tool_choice = {"type": "function", "function": {"name": state["force_tool"]}}
+        msg = await chat_with_tools(
+            state["messages"], tools=TOOLS, model=model, tool_choice=tool_choice
+        )
         messages = state["messages"] + [msg]
         if not (msg.get("tool_calls") or []):
             return {
