@@ -32,9 +32,12 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     tenant_id = current_tenant_id.get()
     async with _session_factory() as session:
         if tenant_id is not None:
-            # SET LOCAL 只在当前事务内生效，连接归还连接池后不残留 —— 防止串租户
+            # set_config(..., is_local=true) 等价 SET LOCAL：只在当前事务内生效，
+            # 连接归还连接池后不残留 —— 防止串租户。用 set_config 而非 SET LOCAL，
+            # 因为 asyncpg 的 SET LOCAL 不支持绑定参数（utility 语句无法参数化）。
             await session.execute(
-                text("SET LOCAL app.current_tenant = :tid"), {"tid": tenant_id}
+                text("SELECT set_config('app.current_tenant', :tid, true)"),
+                {"tid": tenant_id},
             )
         try:
             yield session

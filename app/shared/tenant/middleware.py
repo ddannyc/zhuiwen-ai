@@ -12,12 +12,13 @@ from app.core.database import current_tenant_id
 from app.shared.auth.jwt import decode_token
 
 # 不需要租户上下文的公开路径
-PUBLIC_PATHS = ("/health", "/docs", "/openapi.json", "/auth/login")
+PUBLIC_PATHS = ("/health", "/docs", "/openapi.json", "/auth/login", "/auth/token")
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
-        if request.url.path.startswith(PUBLIC_PATHS):
+        # CORS 预检（OPTIONS）无 Authorization，交给外层 CORS 中间件处理，勿在此拦。
+        if request.method == "OPTIONS" or request.url.path.startswith(PUBLIC_PATHS):
             return await call_next(request)
 
         auth = request.headers.get("Authorization", "")

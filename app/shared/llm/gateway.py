@@ -28,3 +28,31 @@ async def chat(messages: list[dict], model: str = "gpt-4o-mini", **kwargs) -> st
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
+
+
+async def chat_with_tools(
+    messages: list[dict], tools: list[dict], model: str = "gpt-4o-mini", **kwargs
+) -> dict:
+    """带工具的对话。透传 tools 给 LiteLLM（OpenAI 兼容），返回完整 message
+    （含 tool_calls）。供 chat 域 agent 在 LangGraph 节点内手动跑工具循环用。
+
+    刻意不引入 langchain-openai：守住"gateway 是 LLM 唯一出口"。
+    返回的 message dict 形如：
+      {"role": "assistant", "content": str|None, "tool_calls": [...]?}
+    """
+    tenant_id = current_tenant_id.get()
+    async with httpx.AsyncClient(base_url=settings.litellm_base_url) as client:
+        resp = await client.post(
+            "/chat/completions",
+            headers={"Authorization": f"Bearer {settings.litellm_master_key}"},
+            json={
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "metadata": {"tenant_id": tenant_id},
+                **kwargs,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]

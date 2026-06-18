@@ -1,30 +1,23 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { TENANT_NAMES } from "../lib/mockApi";
+import { TENANT_NAMES } from "../lib/tenants";
 
 export function ConversationSidebar({
   activeId,
   onSelect,
+  onNew,
 }: {
   activeId: string | null;
   onSelect: (id: string) => void;
+  onNew: () => void;
 }) {
-  const qc = useQueryClient();
   const { session, logout } = useAuth();
   const tenantName =
     (session && TENANT_NAMES[session.tenant_id]) ?? session?.tenant_id;
   const { data: conversations = [] } = useQuery({
     queryKey: ["conversations"],
     queryFn: () => api.listConversations(),
-  });
-
-  const create = useMutation({
-    mutationFn: () => api.createConversation(),
-    onSuccess: (c) => {
-      qc.invalidateQueries({ queryKey: ["conversations"] });
-      onSelect(c.id);
-    },
   });
 
   return (
@@ -34,8 +27,13 @@ export function ConversationSidebar({
         <span className="font-semibold text-slate-800">飞猴</span>
       </div>
       <button
-        className="mx-3 mb-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-        onClick={() => create.mutate()}
+        className={
+          "mx-3 mb-2 rounded-lg border px-3 py-1.5 text-sm hover:bg-slate-50 " +
+          (activeId === null
+            ? "border-slate-400 bg-slate-50 text-slate-900"
+            : "border-slate-300 text-slate-700")
+        }
+        onClick={onNew}
       >
         ＋ 新对话
       </button>
@@ -66,7 +64,7 @@ export function ConversationSidebar({
           </button>
         </div>
         <span className="text-xs text-slate-400">
-          用户 {session?.user_id} · mock 后端
+          用户 {session?.user_id}
         </span>
       </div>
     </aside>

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://localhost:4000"
     litellm_master_key: str = "change-me"
 
+    # --- 规则知识库 (rules_kb) ---
+    # 本期最小实现读这个 jsonl 种子语料；后续换 Postgres+pgvector 时弃用。
+    rules_kb_path: str = "data/rules_kb/ozon_rules.jsonl"
+
     # --- 可观测 (Langfuse) ---
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

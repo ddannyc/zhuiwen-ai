@@ -1,6 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { api } from "./lib/api";
+import { useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { LoginGate } from "./components/LoginGate";
 import { ConversationSidebar } from "./components/ConversationSidebar";
@@ -16,37 +14,28 @@ export default function App() {
 
 function Shell() {
   const { session } = useAuth();
-  const qc = useQueryClient();
+  // activeId 为 null = 新对话草稿（未落库）。首条消息发送时才在后端建会话，
+  // 避免点「新对话」就落一条空白会话污染列表。
   const [activeId, setActiveId] = useState<string | null>(null);
-  const creating = useRef(false); // 守卫：StrictMode 双调 effect 也只建一次
 
-  // 登录后自动建首个会话；登出时清空选中。
   useEffect(() => {
-    if (!session) {
-      setActiveId(null);
-      creating.current = false;
-      return;
-    }
-    if (activeId || creating.current) return;
-    creating.current = true;
-    api.createConversation().then((c) => {
-      qc.invalidateQueries({ queryKey: ["conversations"] });
-      setActiveId(c.id);
-    });
-  }, [session, activeId, qc]);
+    if (!session) setActiveId(null); // 登出清空
+  }, [session]);
 
   if (!session) return <LoginGate />;
 
   return (
     <div className="flex h-full">
-      <ConversationSidebar activeId={activeId} onSelect={setActiveId} />
-      {activeId ? (
-        <ChatPane key={activeId} conversationId={activeId} />
-      ) : (
-        <div className="flex flex-1 items-center justify-center text-slate-400">
-          加载中…
-        </div>
-      )}
+      <ConversationSidebar
+        activeId={activeId}
+        onSelect={setActiveId}
+        onNew={() => setActiveId(null)}
+      />
+      <ChatPane
+        key={activeId ?? "draft"}
+        conversationId={activeId}
+        onConversationCreated={setActiveId}
+      />
     </div>
   );
 }

@@ -22,8 +22,12 @@ app/
 │   ├── publishing/workflows.py#   多平台批量刊登（Temporal durable workflow）
 │   └── customer_service/      #   智能客服（示范跨域调用纪律）
 └── workers/main.py            # ② Worker 进程入口  (python -m app.workers.main)
-migrations/
-└── 001_rls_setup.sql          # ★ 数据库层强制租户隔离（RLS 策略）
+migrations/                    # Alembic 迁移（版本化，up/down）
+├── env.py                     #   连 admin 连接；URL 取自 config
+└── versions/
+    ├── 0001_chat_setup.py     #   chat 域表 + RLS（基线，无 pgvector 依赖）
+    └── 0002_knowledge_base.py #   pgvector + kb 表 + RLS（需装 pgvector）
+web/                           # 前端（Vite + React + TS），打后端 /auth、/chat
 ```
 
 ## 两类进程，一份代码
@@ -61,10 +65,68 @@ migrations/
 故障会拖垮全局、团队多组互相等部署、独立合规/数据驻留要求（如欧盟数据留欧盟）。
 信号出现前拆 = 过早优化。
 
-## 依赖（示意）
+## 依赖
+
+Python 依赖用 **uv** 管理（`pyproject.toml` + `uv.lock`）。前端用 **pnpm**。
 
 ```
 fastapi uvicorn sqlalchemy[asyncio] asyncpg pgvector
-pydantic-settings pyjwt httpx redis
-langgraph temporalio langfuse
+pydantic-settings pyjwt httpx langgraph temporalio
+alembic psycopg[binary]            # 迁移工具
 ```
+
+## 本地启动
+
+### 前置
+- **uv**（Python 依赖/运行）、**Postgres 14+**、**Node + pnpm**（前端）
+- 可选：**pgvector** 扩展（仅 `knowledge_base` 域需要，chat 不需要）；
+  **LiteLLM** 网关（真实 LLM 回答需要，否则路由/检索仍可测）
+
+### 1. 配置
+```bash
+cp .env.example .env
+# 编辑 .env：把 database_admin_url 的 <superuser> 改成本机 PG 超级用户
+# （macOS Homebrew/Postgres.app 通常是你的 OS 用户名，本地多为 trust 认证）
+```
+
+### 2. 后端
+```bash
+uv sync                              # 装依赖（含 dev）
+uv run python scripts/db_bootstrap.py  # 建库 xborder + app 角色 + 授权（幂等，对标 rails db:create）
+uv run alembic upgrade 0001_chat     # 迁移到 chat 基线（不需 pgvector）
+# 装了 pgvector 才跑全量： uv run alembic upgrade head
+uv run uvicorn app.main:app --reload --port 8000
+```
+
+### 3. 前端
+```bash
+cd web
+pnpm install
+pnpm dev                             # http://localhost:5173
+# 后端地址默认 http://localhost:8000，可用 VITE_API_BASE 覆盖
+```
+
+### 4. 登录（demo 账号）
+内置「一租户两员工」：账号 **alice** / **bob**，密码均 **demo**（同租户，互不可见对方会话）。
+真实回答需 LiteLLM 在线；未起时工具路由/规则检索/落库仍正常，回答文本为占位。
+
+## 数据库迁移（Alembic，类 rails db:migrate）
+
+```bash
+uv run alembic upgrade head          # 升到最新
+uv run alembic downgrade -1          # 回退一步
+uv run alembic current               # 当前版本
+uv run alembic history               # 迁移历史
+uv run alembic revision -m "xxx"     # 新建迁移（手写 op.execute；RLS 不能 autogenerate）
+```
+
+迁移用 admin 连接（`database_admin_url`，超级用户）跑；运行期业务用受 RLS 约束的
+`app` 角色（`database_url`）。RLS / `current_setting` 默认值 / 策略均手写在版本文件里。
+
+## 测试
+
+```bash
+uv run pytest -q
+```
+含规则检索契约、chat 路由全链路（mock LLM）、/auth、真 HTTP e2e（打真 PG + RLS，
+PG 不可达则自动 skip）。

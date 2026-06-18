@@ -12,7 +12,13 @@ interface Streaming {
   tool: string | null;
 }
 
-export function ChatPane({ conversationId }: { conversationId: string }) {
+export function ChatPane({
+  conversationId,
+  onConversationCreated,
+}: {
+  conversationId: string | null; // null = 新对话草稿，未落库
+  onConversationCreated: (id: string) => void;
+}) {
   const qc = useQueryClient();
   const [streaming, setStreaming] = useState<Streaming | null>(null);
   const [pendingUser, setPendingUser] = useState<string | null>(null);
@@ -20,7 +26,8 @@ export function ChatPane({ conversationId }: { conversationId: string }) {
 
   const { data: messages = [] } = useQuery({
     queryKey: ["messages", conversationId],
-    queryFn: () => api.listMessages(conversationId),
+    queryFn: () => api.listMessages(conversationId as string),
+    enabled: !!conversationId, // 草稿态不拉历史
   });
 
   useEffect(() => {
@@ -28,11 +35,17 @@ export function ChatPane({ conversationId }: { conversationId: string }) {
   }, [messages, streaming]);
 
   async function send(text: string) {
+    // 草稿态：首条消息发送时才真正建会话（空白会话不落库）。
+    let id = conversationId;
+    if (!id) {
+      const c = await api.createConversation();
+      id = c.id;
+    }
+
     setPendingUser(text);
     setStreaming({ content: "", action: null, tool: null });
-    let action: ChatAction | null = null;
     let content = "";
-    for await (const ev of api.sendMessage(conversationId, text)) {
+    for await (const ev of api.sendMessage(id, text)) {
       if (ev.event === "tool_running")
         setStreaming((s) => s && { ...s, tool: ev.data.label });
       else if (ev.event === "token") {
@@ -40,8 +53,7 @@ export function ChatPane({ conversationId }: { conversationId: string }) {
         setStreaming((s) => s && { ...s, content, tool: null });
       } else if (ev.event === "payload") {
         // 富结构到位，才挂动作组件（骨架 action 事件无 payload 字段，不能渲）。
-        action = ev.data;
-        setStreaming((s) => s && { ...s, action });
+        setStreaming((s) => s && { ...s, action: ev.data });
       } else if (ev.event === "done") break;
       else if (ev.event === "error") {
         content += `\n\n⚠️ ${ev.data.msg}`;
@@ -49,10 +61,12 @@ export function ChatPane({ conversationId }: { conversationId: string }) {
       }
     }
     // 落库真源刷新，清临时态
-    await qc.invalidateQueries({ queryKey: ["messages", conversationId] });
+    await qc.invalidateQueries({ queryKey: ["messages", id] });
     await qc.invalidateQueries({ queryKey: ["conversations"] });
     setStreaming(null);
     setPendingUser(null);
+    // 草稿首发完成 → 切到真实会话 id（父级 remount，载入持久化历史 + LLM 标题）
+    if (!conversationId) onConversationCreated(id);
   }
 
   return (

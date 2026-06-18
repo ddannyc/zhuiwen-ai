@@ -4,7 +4,10 @@
 所有域的 router 在这里聚合挂载。
 """
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.domains.auth.router import router as auth_router
+from app.domains.chat.router import router as chat_router
 from app.domains.knowledge_base.router import router as kb_router
 from app.shared.tenant.middleware import TenantMiddleware
 
@@ -14,7 +17,16 @@ from app.shared.tenant.middleware import TenantMiddleware
 # from app.domains.customer_service.router import router as cs_router
 
 app = FastAPI(title="XBorder AI")
+# 中间件顺序：Starlette 最后 add 的在最外层。CORS 必须最外层，
+# 否则 TenantMiddleware 会先拦截带 Authorization 的 OPTIONS 预检（无 token → 401）
+# 导致浏览器报 CORS 失败。故先 add Tenant、后 add CORS。
 app.add_middleware(TenantMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
@@ -22,7 +34,9 @@ async def health():
     return {"status": "ok"}
 
 
+app.include_router(auth_router)
 app.include_router(kb_router)
+app.include_router(chat_router)
 # app.include_router(listing_router)
 # app.include_router(publishing_router)
 # app.include_router(cs_router)
