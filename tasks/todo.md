@@ -8,7 +8,7 @@
 
 ## Phase 1 — 队列地基
 - [x] T1.1 `app/shared/queue/` procrastinate App(PsycopgConnector) + `tenant_session`
-- [ ] T1.2 迁移 `0004_procrastinate`：注入 procrastinate schema（alembic up/down）
+- [x] T1.2 迁移 `0004_procrastinate`：注入 procrastinate schema（alembic up/down）
 - [ ] T1.3 trivial `ping` task：defer→worker→RLS 隔离验证
 - [ ] T1.A（并行）`sourcing/miaoshou.py`：url_fetch/edit/delete/tk_list_items/shops 封装
 - [ ] **✅ C1**：procrastinate worker 起；trivial task defer→执行→RLS 过；alembic up/down 净
