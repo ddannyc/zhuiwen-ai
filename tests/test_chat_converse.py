@@ -204,6 +204,21 @@ async def test_converse_persists_user_and_assistant(captured):
 
 
 # ---- converse_stream：SSE 事件序列 ----
+async def test_converse_stream_empty_rules_no_token(captured):
+    """空检索：流式不发 token——守卫文案由前端 RuleCiteCard(empty) 渲，避免与流式文本
+    两条「未找到」重叠/覆盖（用户报的 bug）。"""
+    captured.responses.append(_tool_call("rules_search", {"query": "玩具含磁铁", "platform": "amazon"}))
+    captured.responses.append(_final("（安全回答）"))
+
+    events = [ev async for ev in _service().converse_stream("conv-1", "亚马逊玩具含磁铁能卖吗")]
+    names = [e["event"] for e in events]
+    payload = [e for e in events if e["event"] == "payload"][0]
+
+    assert payload["data"]["empty"] is True
+    assert "token" not in names, "空检索不应流式 token（前端卡片渲空文案）"
+    assert "payload" in names and names[-1] == "done"
+
+
 async def test_converse_stream_event_order(captured):
     captured.responses.append(_tool_call("rules_search", {"query": "费用", "platform": "ozon"}))
     captured.responses.append(_final("依据知识库……" * 3))

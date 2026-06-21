@@ -182,10 +182,14 @@ class ChatService:
         for t in tools_used:
             yield {"event": "tool_running", "data": {"tool": t, "label": TOOL_LABELS.get(t, t)}}
 
-        # 3) 逐字打字（已守卫文本，块间小延迟让前端可见地逐步渲染）
-        for delta in _chunk(reply, 10):
-            yield {"event": "token", "data": {"delta": delta}}
-            await asyncio.sleep(0.02)
+        # 3) 逐字打字（已守卫文本，块间小延迟让前端可见地逐步渲染）。
+        #    空检索除外：守卫文案由前端 RuleCiteCard(empty) 渲，若再流式同义文本，会与卡片
+        #    两条「未找到」重叠/覆盖（用户报的 bug）。故空检索不流 token，只发 payload。
+        is_empty_rules = action.get("type") == "rules_search" and action.get("empty")
+        if not is_empty_rules:
+            for delta in _chunk(reply, 10):
+                yield {"event": "token", "data": {"delta": delta}}
+                await asyncio.sleep(0.02)
 
         yield {"event": "payload", "data": action}
         msg = await self.repo.add_message(conversation_id, "assistant", reply, action=action)
