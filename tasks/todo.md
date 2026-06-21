@@ -24,7 +24,8 @@
       ← 第一个可演示里程碑（真实跑通待 T0 妙手实测 + 真 DASHSCOPE_API_KEY）
 
 ## Phase 3 — 后处理深化
-- [ ] T3.1 翻译 + 图片质检（studio + miaoshou.edit 回写，options 开关）
+- [x] T3.1 翻译 + 图片质检（编排 + miaoshou.edit/delete 回写，options 开关）
+      ⚠ 翻译/质检钩子默认 passthrough：zhuiwen_studio 外部模块未移植，真实接入另列
 - [ ] T3.2 上架 `tk_list_items`（box-id 驱动，tk_auto 可选）
 - [ ] **✅ C3**：全管线按 options 跑通，各段 mock 断言调用链
 

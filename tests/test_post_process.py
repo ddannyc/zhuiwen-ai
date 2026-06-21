@@ -77,6 +77,87 @@ async def test_post_process_done_with_scores(monkeypatch):
         assert job.result["scores"][0]["title"] == "耳机"  # 违禁词清掉
 
 
+async def test_post_process_translate_and_delete_failing(monkeypatch):
+    """T3.1：开 translate → 删不达标 box 条目 + 翻译达标条目标题（miaoshou.edit 回写）。"""
+    import app.domains.sourcing.tasks as t
+
+    calls: dict = {"edit": [], "delete": []}
+
+    class FakeMS:
+        def url_fetch(self, urls, limit=None):
+            return [
+                {"id": "1", "title": "耳机", "images": ["a.jpg", "b.jpg"], "price_cny": 50, "source_url": urls[0]},
+                {"id": "2", "title": "垃圾品", "images": [], "price_cny": 1, "source_url": urls[0]},
+            ]
+
+        def delete(self, ids):
+            calls["delete"].append(list(ids))
+            return {"deleted": len(ids)}
+
+        def edit(self, item_id, changes):
+            calls["edit"].append((item_id, changes))
+            return {"ok": True}
+
+    async def fake_llm(system, user):
+        return [{"i": 0, "score": 90, "title_en": "Earbuds"}, {"i": 1, "score": 30}]
+
+    async def fake_translate(title, lang):
+        return f"EN:{title}"
+
+    monkeypatch.setattr(t, "_make_miaoshou", lambda: FakeMS())
+    monkeypatch.setattr(t, "_llm_json", fake_llm)
+    monkeypatch.setattr(t, "_translate_title", fake_translate)
+
+    tenant = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    await _seed_batch(tenant, batch_id, {"threshold": 70, "translate": True, "lang": "en"})
+    await _run_worker(tenant, batch_id)
+
+    # 不达标 id=2 删除；达标 id=1 标题翻译回写
+    assert ["2"] in calls["delete"]
+    assert any(i == "1" and ch.get("title") == "EN:耳机" for i, ch in calls["edit"])
+    async with tenant_session(tenant) as db:
+        job = await SourcingRepository(db).get_job(batch_id)
+        assert job.post_status == "done"
+        assert job.result["edits"]["deleted"] == 1
+        assert job.result["edits"]["edited"] == 1
+
+
+async def test_post_process_optimize_picks_images(monkeypatch):
+    """T3.1：开 optimize → pick_good_images 选优 → edit 回写 imgUrls。"""
+    import app.domains.sourcing.tasks as t
+
+    edits: list = []
+
+    class FakeMS:
+        def url_fetch(self, urls, limit=None):
+            return [{"id": "1", "title": "好品", "images": ["a.jpg", "b.jpg", "c.jpg"], "price_cny": 50, "source_url": urls[0]}]
+
+        def delete(self, ids):
+            return {"deleted": 0}
+
+        def edit(self, item_id, changes):
+            edits.append((item_id, changes))
+            return {"ok": True}
+
+    async def fake_llm(system, user):
+        return [{"i": 0, "score": 90}]
+
+    async def fake_pick(images):
+        return images[:1]  # 只留第一张
+
+    monkeypatch.setattr(t, "_make_miaoshou", lambda: FakeMS())
+    monkeypatch.setattr(t, "_llm_json", fake_llm)
+    monkeypatch.setattr(t, "_pick_good_images", fake_pick)
+
+    tenant = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    await _seed_batch(tenant, batch_id, {"threshold": 70, "optimize": True})
+    await _run_worker(tenant, batch_id)
+
+    assert any(i == "1" and ch.get("imgUrls") == ["a.jpg"] for i, ch in edits)
+
+
 async def test_post_process_miaoshou_failure_marks_failed(monkeypatch):
     import app.domains.sourcing.tasks as t
 

@@ -35,8 +35,47 @@ async def _default_llm_json(system: str, user: str) -> list:
 _llm_json = _default_llm_json
 
 
+async def _translate_title(title: str, lang: str) -> str:
+    """翻译标题。真实接 zhuiwen_studio.translate_title（外部模块，本仓库未移植）——
+    未接入时 passthrough（不改写），单测注入替身。"""
+    return title
+
+
+async def _pick_good_images(images: list[str]) -> list[str]:
+    """图片质检选优。真实接 zhuiwen_studio.pick_good_images（外部模块未移植）——
+    未接入时 passthrough，单测注入替身。"""
+    return images
+
+
+async def _apply_post_edits(miaoshou, cands: list[dict], scores: list[dict], options: dict) -> dict:
+    """评分后整理 box：删不达标条目；按 options 翻译标题 / 质检图片，经 miaoshou.edit 回写。
+    妙手 edit/delete 仅在确有动作时调用（保持对 mock/真实客户端的最小依赖）。"""
+    by_id = {c.get("id"): c for c in cands}
+    failing = [str(s["id"]) for s in scores if not s["pass"] and s["id"] is not None]
+    passing = [s["id"] for s in scores if s["pass"] and s["id"] is not None]
+
+    if failing:
+        miaoshou.delete(failing)
+
+    edited = 0
+    for sid in passing:
+        c = by_id.get(sid) or {}
+        changes: dict = {}
+        if options.get("translate"):
+            changes["title"] = await _translate_title(c.get("title", ""), options.get("lang", ""))
+        if options.get("optimize"):
+            imgs = c.get("images") or []
+            if imgs:
+                changes["imgUrls"] = await _pick_good_images(imgs)
+        if changes:
+            miaoshou.edit(str(sid), changes)
+            edited += 1
+
+    return {"deleted": len(failing), "edited": edited}
+
+
 async def _process(repo: SourcingRepository, batch_id: str) -> dict:
-    """纯管线：读批 → 妙手 fetch → 评分 → 合并 result（不改状态，由 task 包装收尾）。"""
+    """纯管线：读批 → 妙手 fetch → 评分 → 整理 box（删失败/翻译/质检）→ 合并 result。"""
     batch = await repo.get_job(batch_id)
     if batch is None:
         raise ValueError(f"batch 不存在: {batch_id}")
@@ -44,19 +83,22 @@ async def _process(repo: SourcingRepository, batch_id: str) -> dict:
     urls = payload.get("urls") or []
     options = payload.get("options") or {}
 
-    cands = _make_miaoshou().url_fetch(urls)
+    miaoshou = _make_miaoshou()
+    cands = miaoshou.url_fetch(urls)
     scored = await score_candidates(
         cands,
         threshold=int(options.get("threshold", 70)),
         top_n=int(options.get("top_n", 0)),
         llm_json=_llm_json,
     )
+    edits = await _apply_post_edits(miaoshou, cands, scored["scores"], options)
     return {
         **payload,
         "cands": cands,
         "scores": scored["scores"],
         "count": scored["count"],
         "passed": scored["passed"],
+        "edits": edits,
     }
 
 
