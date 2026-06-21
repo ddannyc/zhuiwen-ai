@@ -4,9 +4,24 @@
 空检索不编造。数据是 needs_review 的多平台种子语料
 （ozon/amazon/tiktok/temu/shein/mercadolibre，data/rules_kb/*_rules.jsonl）。
 """
-from app.domains.rules_kb.service import RulesKbService
+from app.domains.rules_kb.service import RulesKbService, _fuse
 
 svc = RulesKbService(session=None)  # search 不碰 session
+
+
+def test_fuse_lexical_exact_ranks_above_pure_semantic():
+    """RRF 融合：词法精确命中的规则，应排在向量更近但无词法命中的规则之上。"""
+    rows = [
+        # b 向量更近(dist 0.30)但与 query 无词法重叠
+        {"rule_id": "b", "title": "退货政策说明", "summary": "", "content": "",
+         "tags": [], "dist": 0.30},
+        # a 向量稍远(dist 0.45)但词法精确命中"取消率"
+        {"rule_id": "a", "title": "取消率超标会被封号", "summary": "", "content": "",
+         "tags": [], "dist": 0.45},
+    ]
+    out = _fuse(rows, "取消率", limit=5)
+    assert out, "两条 dist 均在阈值内，应有候选"
+    assert out[0]["title"] == "取消率超标会被封号", "词法精确命中应被 RRF 抬到首位"
 
 
 async def test_ozon_hit_carries_sourcing():

@@ -1,218 +1,122 @@
-# 实施计划：sourcing 客户端化 + 去 Temporal（procrastinate）
+# PLAN：rules_kb pgvector 混合检索升级
 
-> 源：`SPEC.md` + `docs/sourcing-client-migration.md`。本计划按**垂直切片**（每任务一条完整可验路径）+ **阶段检查点**组织。
-> 读取范围已核：sourcing 域、`tmp/zhuiwen_web.py` 妙手调用、procrastinate（context7）、config/deps。
-> 状态：待人工评审。批准后逐阶段执行，每阶段检查点过了才进下一阶段。
-
----
-
-## 0. 关键事实（计划前提）
-
-- procsastinate 无 asyncpg/async-SQLAlchemy 连接器 → **不做单事务原子 defer**，用 `post_status` outbox + cron 兜底（ADR-001）。
-- 妙手不吃外部商品数据、按 box-id 上架、自抓 1688 → **扩展只回传 offer URL**（ADR-002）。
-- `psycopg[binary]>=3.3.4` 已在依赖 → procrastinate `PsycopgConnector`(psycopg3) 即用，无新驱动。
-- 删除目标：`temporalio` 依赖、`temporal_*` config、`sourcing/workflows.py`+`activities.py` 的 Temporal 部分、compose `temporal` 服务、`tests/test_sourcing_workflow.py`。
+> 依据 SPEC.md。垂直切片（每任务一条可验证的完整路径），非按层横切。
+> 每阶段末有 checkpoint，人工确认后再进下一阶段。
 
 ---
 
-## 1. 依赖图（组件级）
+## 依赖图
 
 ```
-                 ┌─────────────────────────────────────────┐
-   T0 妙手fetch实测(GATE) ── 决定方案是否成立                 │
-                 └─────────────────────────────────────────┘
-                                │ pass
-   ┌──────────────┐   ┌──────────────────┐
-   │ Phase1 队列地基 │   │ T1 妙手client封装  │   (二者可并行)
-   │ procrastinate  │   │ url/edit/delete/  │
-   │ +tenant_session│   │ tk_list_items     │
-   │ +trivial task  │   └────────┬─────────┘
-   └───────┬────────┘            │
-           │   ┌─────────────────┘
-           ▼   ▼
-   ┌──────────────────────────────────┐
-   │ Phase2 ingest 垂直切片             │  migration0004 → /ingest(urls) →
-   │ URL→存库→入队→妙手fetch→评分→存result │  post_process(fetch+score) → GET 状态
-   └───────┬──────────────────────────┘
-           ▼
-   ┌──────────────┐   ┌──────────────────┐   ┌─────────────────┐
-   │ Phase3 后处理深 │   │ Phase4 可靠性      │   │ Phase5 去Temporal │
-   │ 翻译/质检/上架  │   │ outbox cron+幂等   │   │ worker改/删编排    │
-   └───────┬──────┘   └────────┬─────────┘   └────────┬────────┘
-           └──────────┬─────────┴──────────────────────┘
-                      ▼
-              ┌──────────────┐      ┌──────────────┐
-              │ Phase6 扩展端  │      │ Phase7 测试硬化 │
-              │ client/ URL采集 │      │ 全套           │
-              └──────────────┘      └──────────────┘
+T0 spike: DashScope embedding 经 litellm 实测  ──┐ (闸：不通则改方案)
+                                                 ▼
+T1 embed_text 重写 + config ─────────┐
+                                     ├──► T3 灌库脚本 ──┐
+T2 migration 0004 + models ──────────┘                 │
+        │                                              ▼
+        └──────────► T4 repository + service 混合检索 ◄─┘
+                              │
+                              ▼
+                     T5 测试（DB 集成 + 离线契约恒绿）
 ```
 
-切片纪律：**每任务跑通一条端到端路径**（非按层堆）。如 Phase2 一次打通「URL 进→结果出」，而非先写完所有 model 再写所有 endpoint。
+关键依赖：
+- **T0 是闸**：DashScope text-embedding-v3 经 `litellm.aembedding` + `dimensions=1024`
+  不通，则 T1 改方案（直 httpx 打 DashScope /embeddings 或换模型），先问用户。
+- T3 灌库需 T1（embed）+ T2（表）双就绪。
+- T4 service 混合需 T1（query embed）+ T4 repository（向量 SQL）；jsonl 回退路径不依赖 DB。
+- T5 离线契约测试只依赖 service 回退路径（T4 必须保住 session=None 行为）。
 
 ---
 
-## 2. 阶段与任务
+## 阶段与切片
 
-### Phase 0 — 去风险闸门（GATE）
+### 阶段 A — 地基（T0–T2）
 
-**T0 妙手 `url` fetch 风控实测**
-- 目标：真实账号小批量验证 `SELECT_CMD --mode url --urls <真实1688offer>` 能成功 fetch 详情。
-- 验收：≥1 批真实 offer URL 返回非空 cands JSON；记录成功率。
-- 验证：手跑妙手 CLI（需妙手凭证 + select.py 环境）。
-- **闸门**：若妙手自抓也撞风控/失败 → 暂停，整方案重议（妙手吃不了外部数据，上架链断）。**不过不进 Phase1+。**
-- 依赖：无。阻断全局。
+**T0｜spike：DashScope embedding 连通性验证**
+- 一次性脚本（可丢弃 / 收进 scripts/）：`litellm.aembedding(model="openai/text-embedding-v3",
+  api_base=dashscope_base_url, api_key=dashscope_api_key, input=["测试"], dimensions=1024)`。
+- 验收：返回 1 个 1024 维 float 向量，无异常。
+- 验证：打印 `len(resp.data[0]["embedding"]) == 1024`。
+- 失败处置：记录错误，停下问用户（SPEC §8 风险 1）。**不绕过往下做。**
 
----
+**T1｜embed_text 重写 + config**
+- 改 `app/shared/llm/embeddings.py`：`embed_text(texts, model=...)` 走 `litellm.aembedding`
+  → DashScope（同 gateway 模式：`openai/` 前缀 + api_base + api_key + dimensions）。
+- 改 `app/core/config.py`：+`embedding_model="text-embedding-v3"`、`embedding_dim=1024`；
+  rules_kb_path 注释更新（作回退源，不再标弃用）。
+- 验收：`await embed_text(["a","b"])` 返回 2×1024 向量；knowledge_base 既有调用签名不破。
+- 验证：`uv run python -c "import asyncio; from app.shared.llm.embeddings import embed_text; print(len(asyncio.run(embed_text(['x']))[0]))"` → 1024。
 
-### Phase 1 — 队列地基（垂直：defer→worker→RLS 写库）
+**T2｜migration 0004 + ORM models**
+- `migrations/versions/0004_rules_kb.py`（down_revision="0003_sourcing"）：
+  `CREATE EXTENSION IF NOT EXISTS vector`；`CREATE TABLE IF NOT EXISTS rules_kb(...)`
+  （SPEC §2 列；**无 tenant_id、无 RLS、无 FORCE RLS**）；
+  hnsw 索引 `(embedding vector_cosine_ops)` + btree `(platform)`。
+  downgrade：`DROP TABLE IF EXISTS rules_kb CASCADE`。
+- `app/domains/rules_kb/models.py`：`Base` + `RulesKbRow`（embedding `Vector(1024)`，
+  jsonb 列用 `JSONB`，**不声明 tenant_id**）。
+- 验收：`uv run alembic upgrade head` 成功；`\d rules_kb` 有 embedding vector(1024) + hnsw 索引；
+  app 角色可 SELECT（db_bootstrap 默认授权）。
+- 验证：`uv run alembic upgrade head && uv run alembic downgrade -1 && uv run alembic upgrade head`（可逆）。
 
-**T1.1 procrastinate 接入 + queue app**
-- 目标：`app/shared/queue/` 建 procrastinate `App`(PsycopgConnector) + `tenant_session(tenant_id)` 包装（开会话 + `SET app.current_tenant` + RLS）。
-- 文件：`app/shared/queue/__init__.py`、`app.py`、`tenant.py`；`pyproject.toml` 加 `procrastinate`。
-- 验收：`import` 通；app.open_async() 连库成功。
-
-**T1.2 procrastinate schema 迁移**
-- 目标：procrastinate 自有表入库。新迁移 `0004_procrastinate.py` 调 `SchemaManager.get_schema()` 注入（与 alembic 链统一）。
-- 验收：`alembic upgrade head` 建出 procrastinate_jobs 等表；`alembic downgrade -1` 可回退。
-
-**T1.3 trivial task 垂直验证**
-- 目标：定义临时 `ping` task（写一行到某租户表），defer → worker 执行 → RLS 隔离正确。
-- 文件：临时 task + worker 入口雏形。
-- 验收：`defer_async(tenant_id=A)` → worker 跑 → 行落 A 租户，B 租户查不到。
-
-**✅ 检查点 C1**：`uv run python -m app.workers.main`（procrastinate worker）跑起；trivial task defer→执行→RLS 隔离过；`alembic up/down` 干净。删 trivial task 前留一条 e2e 证据。
-
-**并行可做：T1.A 妙手 client 封装**
-- 目标：把 zhuiwen_web 的妙手调用移植为服务端 client：`miaoshou.url_fetch(urls)`、`edit(id, ch)`、`delete(ids)`、`tk_list_items(ids, shop)`、`shops()`。封 `SELECT_CMD` + `_run` 超时。
-- 文件：`app/domains/sourcing/miaoshou.py`。
-- 验收：单测用 fake `SELECT_CMD`（echo 固定 JSON）→ client 解析正确；超时/非零退出 → 结构化错误。
+> **CHECKPOINT 1**：T0 通过（embedding 1024 维实测）+ 表建成可逆。人工确认 → 进阶段 B。
 
 ---
 
-### Phase 2 — ingest 垂直切片（URL→存库→入队→妙手fetch→评分→结果）★核心
+### 阶段 B — 灌库与检索（T3–T4）
 
-**T2.1 迁移 0004→0005：collect_jobs 转 batch 语义**
-- 目标：加列 `post_status/attempts/last_error/source`；旧 `status` poll 语义弃用。保 RLS。
-- 验收：迁移 up/down 干净；现有 sourcing e2e 不炸（或同步改）。
+**T3｜灌库脚本 scripts/load_rules_kb.py**
+- 复用 service 的 `_load_corpus`/`_resolve_path` 读 `data/rules_kb/*_rules.jsonl`（524 条，按 rule_id 去重）。
+- 每条 embed `title + "\n" + summary + "\n" + content`（截断到模型上限）；批量调 embed_text。
+- 用 `database_admin_url`（psycopg 同步即可，仿 db_bootstrap）upsert：
+  `INSERT ... ON CONFLICT (rule_id) DO UPDATE`（幂等，重跑不翻倍）。
+- 日期字段 null 容错；数组字段（product_category/related_rule_ids/tags）转 jsonb。
+- `--platform` 可选过滤；打印灌入条数。
+- 验收：跑后 `SELECT count(*) FROM rules_kb` ≈ 去重后条数，embedding 非 null；重跑条数不变。
+- 验证：`uv run python scripts/load_rules_kb.py` 两次，count 一致。
 
-**T2.2 `/sourcing/ingest` 端点（收 urls）**
-- 目标：`IngestRequest{market, urls[], options}` → 校验（1688 offer URL、去重、≤200）→ 存批 `post_status='pending'`（asyncpg/RLS）→ 提交后 `defer_async(post_process, batch_id, tenant_id)` 置 `queued`。
-- 文件：`router.py` + `schemas.py` + `service.py`。删旧 `/jobs/poll`+`/done`。
-- 验收：curl 带 JWT POST urls → 201 + batch_id + post_status；非 1688 URL → 422；空 → 422。
+**T4｜repository + service 混合检索（核心垂直切片）**
+- `app/domains/rules_kb/repository.py`：`RulesKbRepository.search_filtered(query_emb, platform, site)`
+  → `SELECT <字段>, embedding <=> :q AS dist FROM rules_kb WHERE <platform/site 硬过滤>`
+  （site：精确 OR GLOBAL，对齐现 jsonl 逻辑 service.py:138-140）。corpus 小，取回过滤全集。
+- `app/domains/rules_kb/service.py`：
+  - 抽共享 helper：`_apply_filters`（platform/site）、`_score`（bigram，复用）、`_rrf` 融合。
+  - `search()` 分流：`self.session is None` → jsonl 回退（现逻辑，原样保留）；
+    否则主路径：embed query → repository 取候选 → vector_rank + lexical_rank → RRF（k=60）
+    → top-N → 投影 `_RETURN_FIELDS`。
+  - **表空 / 异常 → 回退 jsonl**（不抛给上层，SPEC 优雅降级）。
+- 验收：session=None 时行为与今日逐字节一致（离线契约不破）；session 有效时 DB 路径返回
+  契约字段齐全、platform/site 隔离成立。
+- 验证：`uv run pytest tests/test_rules_kb_search.py`（全绿，回退路径）。
 
-**T2.3 `post_process` task：妙手 fetch + 评分**
-- 目标：task 取 batch → `tenant_session` 设租户 → `miaoshou.url_fetch(urls)` → `_score_candidates`（移植）+ 违禁词清洗 + top_n → 存 `result`(cands+scores) → `post_status='done'`。失败 `attempts++`/`last_error`/`failed`。
-- 文件：`app/domains/sourcing/tasks.py` + `ingest.py`(评分/清洗纯逻辑)。
-- 验收：mock 妙手 client → defer → worker 跑 → batch done + scores 落库 + RLS 正确。
-
-**T2.4 GET 状态对齐**
-- 目标：`GET /sourcing/jobs/{batch_id}` 返回 `post_status/result/scores`。
-- 验收：轮询见 pending→queued→running→done。
-
-**✅ 检查点 C2**（端到端，无扩展）：真实 JWT + 真实 1688 offer URL，curl `/ingest` → worker 妙手 fetch + 评分 → `GET` 见 `done` + scores。跨租户隔离过。**这是 MVP 闭环。**
-
----
-
-### Phase 3 — 后处理深化（翻译/质检/上架）
-
-**T3.1 翻译 + 图片质检段**
-- 目标：options.translate → `studio.translate_title/_images` + `miaoshou.edit` 回写 box；optimize → `pick_good_images`。
-- 验收：开 translate → box 条目标题/图被改写（mock studio 断言调用）。
-
-**T3.2 上架段 `tk_list_items`**
-- 目标：options.list_tiktok → 取达标 box-id → `miaoshou.tk_list_items(ids, shop)`（claimed→认领→选类目→可选发布 tk_auto）。
-- 验收：mock 妙手 → 上架按 box-id 调用；无绑定店铺 → 结构化错误；status≠success 的条目跳过（对齐旧逻辑）。
-
-**✅ 检查点 C3**：全管线（fetch→评分→翻译→上架）按 options 开关跑通；各段 mock 妙手/studio 断言调用链。
+> **CHECKPOINT 2**：灌库成功 + DB 路径手测命中 + 离线契约恒绿。人工确认 → 进阶段 C。
 
 ---
 
-### Phase 4 — 可靠性（outbox cron + 幂等）
+### 阶段 C — 验证（T5）
 
-**T4.1 cron 兜底 task**
-- 目标：procrastinate periodic task，扫 `post_status='pending' AND updated_at<now()-grace` → 重 `defer`。grace=2min、cron=1min（ADR-001 待确认值）。
-- 验收：造「pending 超 grace」批 → cron 扫到重投 → done。
+**T5｜DB 集成测试 tests/test_rules_kb_pgvector.py**
+- fixture：连 DB（无 DB 环境 skip，对齐现有 DB 测试惯例）；灌小样本或依赖已灌库。
+- 用例：
+  1. 语义召回：换词 query（语料「封号」← 查「店铺被关停」）向量路径命中。
+  2. platform 硬隔离在 SQL 路径成立（amazon 查询 0 串 ozon）。
+  3. site GLOBAL 适配任意 site 查询。
+  4. RRF：词法精确命中仍靠前。
+  5. 表空 → 回退 jsonl 不抛错。
+  6. `_RETURN_FIELDS` 契约齐全。
+- 验收：新测试通过；离线契约测试仍全绿。
+- 验证：`uv run pytest tests/test_rules_kb_search.py tests/test_rules_kb_pgvector.py`。
 
-**T4.2 幂等**
-- 目标：`post_process` 进入 CAS `pending/queued→running`；已 `done` 跳过；上架前查重避免重复 list。
-- 验收：对同 batch 连 defer 两次 → 只执行一次上架（断言妙手 list 调一次）。
-
-**✅ 检查点 C4**（崩溃恢复）：worker 跑 task 中途 kill → batch 留 pending/running → cron 重驱 → 最终 done **且只上架一次**。
-
----
-
-### Phase 5 — 去 Temporal
-
-**T5.1 worker 入口改 procrastinate**
-- 目标：`app/workers/main.py` 删 Temporal Worker → `await queue_app.run_worker_async()`（含 cron）。
-- 验收：worker 起、跑 task、跑 cron；Temporal 不再被 import。
-
-**T5.2 删 Temporal 残留**
-- 目标：删 `sourcing/workflows.py`+`activities.py` 的 Temporal 部分（保留被 task 复用的纯逻辑已移 `ingest.py`/`miaoshou.py`）；`config.py` 删 `temporal_*`；`compose.yaml` 删 temporal 服务；`pyproject.toml` 删 `temporalio`；删 `tests/test_sourcing_workflow.py`；README 去 Temporal 段。
-- 验收：`grep -rn temporalio app/` 空；`docker compose config` 无 temporal；`uv sync` 后无 temporalio。
-
-**T5.3 e2e 改写**
-- 目标：`test_e2e_http.py` 的 `force_degraded`/sourcing 用例改为「ingest→存→（InMemory task）→done」断言；删 poll/done 旧断言。
-- 验收：`uv run pytest -q` 全绿，无 Temporal 依赖。
-
-**✅ 检查点 C5**：`pytest` 全绿且**不起 temporal**；`docker compose up` 仅 db；代码无 temporalio。
+> **CHECKPOINT 3**：双测试套件绿 + SPEC §1 不变量逐条对账。人工确认 → 完成/提交。
 
 ---
 
-### Phase 6 — 扩展端 `client/`
+## 回滚策略
+- 代码：service `search()` 分流隔离，删 DB 分支即回纯 jsonl；embeddings 改动可单独 revert。
+- DB：`alembic downgrade -1` 删 rules_kb 表（不影响 chat/kb/sourcing 其他域）。
 
-**T6.1 扩展骨架 + URL 采集器**
-- 目标：MV3 `manifest.json`（host 仅 `*.1688.com`）；`content/scrape.ts` 从列表/搜索/收藏页提 offer URL（纯函数）；`panel.ts` 勾选/批量。
-- 验收：解析器喂固定 1688 列表 HTML 夹具 → 断言 offer URL 集；host 权限仅 1688。
-
-**T6.2 本地队列 + ingest client**
-- 目标：`background/queue.ts`（限频/重试/进度，storage 弱持久）；`api/ingest.ts` 带 JWT POST `/sourcing/ingest`。
-- 验收：扩展 unpacked 加载 → 1688 页采 URL → POST → 服务端 batch 出现。
-
-**✅ 检查点 C6**（真端到端）：浏览器装扩展 → 登录态 1688 采 URL → 自动回传 → 后端妙手 fetch+评分+（可选上架）→ 采集箱见结果。
-
----
-
-### Phase 7 — 测试硬化
-
-**T7.1 全套**
-- 扩展：解析器夹具 + 队列状态机 + host 权限。
-- task：`InMemoryConnector` 跑 post_process 管线 + 重试 + 幂等。
-- ingest e2e：真 PG+RLS，URL→存→done；跨租户隔离。
-- outbox：pending 超 grace → cron 重投。
-- 验收：`uv run pytest -q` + `cd client && pnpm test` 全绿；覆盖关键路径。
-
-**✅ 检查点 C7**：全绿；C2/C4/C6 关键路径各有自动化用例兜底。
-
----
-
-## 3. 检查点汇总（阶段闸门）
-
-| 检查点 | 关口 | 通过判据 |
-|---|---|---|
-| C1 | 队列地基 | trivial task defer→执行→RLS；alembic up/down 净 |
-| C2 | ingest MVP | 真 URL curl→妙手fetch+评分→done；跨租户隔离 |
-| C3 | 后处理全 | fetch/翻译/上架按 options 跑通 |
-| C4 | 可靠性 | worker kill→cron 重驱→done 且只上架一次 |
-| C5 | 去 Temporal | pytest 全绿、不起 temporal、无 temporalio |
-| C6 | 扩展端到端 | 浏览器采 URL→回传→采集箱见结果 |
-| C7 | 测试硬化 | py+扩展测试全绿 |
-
-GATE T0 不过 → 全计划暂停。
-
----
-
-## 4. 回滚 / 风险
-
-- **妙手 fetch 风控（T0）**：最大风险，前置闸门。挡住则方案重议。
-- **procrastinate 投递丢窗**：outbox+cron 兜底（C4 验证），零数据丢失。
-- **去 Temporal 不可逆**：Phase5 前所有功能已在 procrastinate 跑通（C2-C4），删 Temporal 只是去死代码，低风险。保留 git 分支可回退。
-- **扩展分发/JWT 注入**（待决 B）：不阻塞后端 Phase0-5，Phase6 前定。
-
----
-
-## 5. 建议执行顺序
-
-T0(GATE) → [Phase1 ∥ T1.A 妙手client] → Phase2(C2 MVP) → Phase3 → Phase4 → Phase5(去Temporal) → Phase6(扩展) → Phase7。
-
-每阶段检查点过了再进下一阶段。Phase2 的 C2 是第一个可演示里程碑。
+## 非目标（本期不做）
+- PG 中文分词扩展（zhparser）做真 BM25——用 Python bigram，足够。
+- vector top-K 下推 SQL 的规模优化——corpus 小，内存融合；HNSW 索引已备，后续改 repository。
+- 改 embedding 维度 / kb_chunks 表。

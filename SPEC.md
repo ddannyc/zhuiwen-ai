@@ -1,259 +1,170 @@
-# SPEC：商品采集转客户端执行（去 Temporal）
+# SPEC：rules_kb 检索升级为 pgvector 向量+词法混合
 
-> 状态：草案，待确认。本文档是「可行性 + 设计」规格，回答 *采集任务转移到客户端执行是否可行*，并给出落地边界。
-> 不在本轮实现，仅定义方向、范围与红线。
-
----
-
-## 0. TL;DR / 已定决策
-
-**方向确认：抓取搬客户端（过风控），后处理留服务端，去 Temporal，后台队列用 procrastinate（PG，无 Redis）。**
-
-四项决策（已拍板）：
-
-1. ✅ **抓取（fetch）搬客户端**：1688 详情服务端抓撞风控（IP/登录态/验证码），改在用户已登录的浏览器扩展里抓，天然过风控。核心诉求，落地。
-2. ✅ **妙手（Miaoshou）保留**：fetch_item 深采集、采集箱、TikTok 上架继续走妙手 SaaS（`SELECT_CMD`），不自建。扩展负责在登录态 1688 取链接/基础字段并触发；妙手深采 + 上架仍在服务端经妙手 CLI。
-3. ✅ **后处理留服务端**：评分（Qwen）、翻译（studio）、图片质检、上架（妙手）全在服务端，借 RLS + 集中计费 + 可观测。评分/翻译无风控问题，不搬客户端、不暴露 key。
-4. ✅ **去 Temporal，换 procrastinate（PG 队列）**：后处理是低频线性管线（评分→翻译→上架），不需要 Temporal 的 signal/child-workflow/durable-timer。改用 **procrastinate**（PostgreSQL-backed、asyncio 原生、自带重试/退避/cron/LISTEN-NOTIFY），零新基建。详见 §3a。
-
-**架构净变化**：服务端退出「主动爬取」；扩展抓→`/sourcing/ingest` 收→procrastinate 入队→worker 跑评分/翻译/妙手上架→采集箱（RLS 存库）。Temporal server + worker 下线。
+> 规格驱动开发文档。把 chat agent `rules_search` 工具背后的 `RulesKbService`
+> 从「jsonl 种子语料 + 中文 bigram 词法打分」升级为「Postgres + pgvector 向量检索
+> 与词法打分混合（RRF 融合）」。契约不变，只换实现（service.py:9 的承诺兑现）。
 
 ---
 
-## 1. 目标 Objective
+## 1. 目标（Objective）
 
-把 **sourcing 商品采集**（1688 选品 → 评分/翻译 → 上架 TikTok/采集箱）的**抓取执行**从服务端搬到客户端「1688 采集助手」浏览器扩展，**借用户真实登录态 + IP 过 1688/平台风控**；相应地让服务端退出「主动爬取」角色，并评估去除 Temporal 编排。
+**做什么**：给平台合规规则库（rules_kb 域）加向量语义检索，与现有中文 bigram 词法
+打分**混合**（Reciprocal Rank Fusion），提升召回——语义近但用词不同的规则也能命中，
+同时保留词法对专有名词/编号的精确匹配。
 
-**目标用户**：跨境电商运营人员，浏览器已登录 1688 货源端 + TikTok/Ozon 卖家后台，日常做选品上架。
+**为什么**：当前纯 bigram 词法，换种说法就漏召回；合规问答漏召回 = 模型自由编造 =
+项目反幻觉红线被击穿。
 
-**成功判据（验收）**：
-1. 运营在 1688 列表/详情页点扩展「采集」，**无服务端 IP 抓取**即可拿到完整商品详情（标题/价格/主图/SKU），成功率显著高于现服务端抓取（撞风控）。
-2. 采集结果经评分（默认阈值可配）后入采集箱，与旧 `ingest_1688_urls` 行为对齐（违禁词清洗、top_n、可选翻译）。
-3. 整条链路**不依赖 Temporal**仍能跑通（happy path），或 Temporal 仅作可选增强。
-4. 合规红线全程不破（见 §8 边界）：仅采本店授权可见数据，不在浏览器调 LLM 抓后台越权数据。
+**面向谁**：chat agent（唯一调用方，经 `rules_search` 工具）。终端用户是跨境电商卖家。
 
-**非目标**：
-- 不动 rules_kb 规则采集（那是另一套「采集」，语义不同，禁合并——见 `docs/chat-redesign-plan.md:73`）。
-- 不重写 chat/agent、auth、RLS。
-- 不替换妙手（已决定保留，依赖 `SELECT_CMD` 不动）。
+**不变量（北极星）**：
+- `RulesKbService.search()` 签名与返回 `_RETURN_FIELDS` 契约**零改动**。
+- platform/site **硬隔离**绝不松动（查 amazon 绝不串 ozon；GLOBAL site 适配任意 site 查询）。
+- 空检索 → 返回 `[]`，上层确定性兜底「未找到」，绝不编造。
+- LLM/embedding **唯一出口**：litellm SDK 进程内 → DashScope，不直连 provider SDK。
 
 ---
 
-## 2. 现状 vs 目标架构
+## 2. 架构与数据流
 
-### 旧（`tmp/zhuiwen_web.py`，已弃）
 ```
-扩展(登录态1688) ──URL──▶ 服务端 ingest_1688_urls
-                              └─ 妙手 SELECT_CMD fetch_item 采集（服务端调，撞风控点）
-                              └─ _score_candidates（Qwen 评分）
-                              └─ studio 翻译/质检图
-                              └─ 妙手 采集箱 / TikTok 上架
-状态：进程内存数组（重启即丢、无租户隔离）
-```
-
-### 现（本仓库，Temporal）
-```
-chat/agent ─collect_products工具─▶ /sourcing/collect
-                                     └─ CollectWorkflow（Temporal，server 编排）
-                                          ├─ enqueue_browser_task（落 pending 行，RLS）
-                                          ├─ wait browser_done 信号（≤1h）
-                                          └─ score→translate→publish（当前为穿透桩）
-扩展 ──poll/done──▶ 桥端点 ──signal──▶ workflow
+chat agent (rules_search 工具)
+  └─ RulesKbService.search(query, platform, site, limit)
+       ├─ session 为 None / 表空 → 【回退】jsonl 词法路径（现逻辑，离线可跑）
+       └─ session 有效 → 【主路径】混合检索
+            ├─ embed_text([query]) ──litellm SDK──> DashScope text-embedding-v3 (1024d)
+            ├─ RulesKbRepository.search_filtered(platform, site)
+            │     SQL: SELECT ..., embedding <=> :q AS dist
+            │          FROM rules_kb WHERE <platform/site 硬过滤>
+            │     （corpus 极小，取回过滤后全集；附 cosine 距离）
+            ├─ Python 融合：
+            │     vector_rank  = 按 dist 升序
+            │     lexical_rank = 按现有 _score(bigram) 降序
+            │     RRF: score = Σ 1/(k + rank)，k=60
+            └─ 取 top-N，投影 _RETURN_FIELDS
 ```
 
-### 目标（客户端自治）
-```
-扩展(登录态1688) ── 在浏览器内：抓详情 →〔评分/翻译可留服务端〕→ 结果
-       └──────── POST 最终结果 ──▶ 服务端 /sourcing/ingest（仅收+存库，RLS）
-服务端：不再主动爬；提供 LLM/规则/采集箱存储能力；Temporal 下线或可选
-```
+**表设计 `rules_kb`（全局共享，无 tenant_id / 无 RLS）**
 
-| 维度 | 现（Temporal） | 目标（客户端） |
+区别于 `kb_chunks`（租户私有，套 RLS）：平台规则跨租户通用，所有租户共读同一份。
+
+| 列 | 类型 | 来源 |
 |---|---|---|
-| 抓取执行 | 浏览器插件 poll/done，server 编排等待 | 浏览器扩展自驱，本地排队 |
-| 风控 | 妙手/服务端抓易撞 | 用户登录态+IP，天然过 |
-| 编排/durable | Temporal server | procrastinate（PG 队列，durable+重试）；扩展本地队列管抓取 |
-| 后处理 | 服务端 activity（桩） | **服务端**（procrastinate task：评分/翻译/妙手上架） |
-| 服务端角色 | 编排 + 存储 + LLM | 收结果 + 存储 + 后处理 + LLM + 规则（退出主动爬取） |
+| rule_id | uuid PK | jsonl |
+| platform, site, original_language, rule_domain, rule_type | text | jsonl |
+| title, summary, content | text | jsonl |
+| severity, source_type, source_url, version | text | jsonl |
+| effective_date, expiry_date, last_verified_at | date (null 容许) | jsonl |
+| verification_status, confidence | text | jsonl |
+| product_category, related_rule_ids, tags | jsonb | jsonl 数组 |
+| embedding | vector(1024) | embed(title + summary + content 截断) |
+| created_at | timestamptz default now() | — |
+
+索引：`USING hnsw (embedding vector_cosine_ops)` + `(platform)` btree。
+
+**embedding 来源统一**：重写 `app/shared/llm/embeddings.py` 的 `embed_text`，
+从废弃的 httpx 直连 litellm 代理（localhost:4000，config 标「本期未启用」）改为
+`litellm.aembedding(model="openai/text-embedding-v3", api_base=dashscope_base_url,
+api_key=dashscope_api_key, dimensions=1024)`——与 `gateway.chat` 同模式同源。
+`knowledge_base` 域复用同一 `embed_text`，自动受益。
 
 ---
 
-## 3. 可行性分析（按管线阶段）
+## 3. 命令（Commands）
 
-| 阶段 | 客户端可行性 | 风控收益 | 风险 / Blocker |
-|---|---|---|---|
-| 1688 列表/详情抓 URL+基础字段 | ✅ 高（扩展读 DOM，已有 v1.x 油猴范式） | ⭐⭐⭐ 核心收益 | 1688 DOM 改版需维护；SPA 路由 hook（油猴脚本已有先例） |
-| 商品完整详情 fetch_item（SKU/规格/全图） | ⚠️ 中 | ⭐⭐⭐ | **妙手在扛这块**。扩展直读详情页可拿大部分，但深字段（批量 SKU、官方接口字段）可能要妙手 |
-| AI 评分 _score_candidates | ✅ 技术可行 | ⭐ 无风控收益 | 浏览器调 DashScope 暴露 key；**建议留服务端** |
-| 翻译标题/图 studio.translate_* | ✅ 技术可行 | ⭐ 无 | 同上，且需图片公网直链供翻译——服务端做更顺 |
-| 图片质检 pick_good_images（Qwen-VL） | ✅ | ⭐ 无 | 同上 |
-| 违禁词清洗 _clean_title | ✅ 纯文本，扩展可做 | — | 词库要同步（现硬编码在 server） |
-| 入采集箱 | 🚩 取决于妙手 | — | 妙手采集箱是 SaaS；弃妙手则要自建 box 存储（现 `box/` 域是桩） |
-| 上架 TikTok（OAuth+发布） | 🚩 妙手扛 | — | 扩展重写 TikTok 上架=大工程；强烈建议保留妙手或服务端代理 |
-
-**净判断**：风控痛点**只在抓取**。把抓取搬扩展拿满收益；评分/翻译/上架搬扩展是负收益（暴露 key、重写妙手）。故「全客户端」过度，**抓取客户端 + 后处理服务端**才是最优解。
-
----
-
-## 3a. 后台队列方案：procrastinate（替代 Temporal）
-
-**为什么 PG 队列而非 Redis/Sidekiq 类**：本仓库已重度依赖 Postgres（RLS、pgvector），后处理低频、量小（单批妙手 fetch ≤520s）。引 Redis = 多一套要跑/监控/备份的基建，且队列在 Redis 时 RLS 管不到、租户隔离要另写。PG 队列：durable 免费、RLS 天然、已有 `claim_next`（`FOR UPDATE SKIP LOCKED`）雏形为证。Redis 仅在吞吐上千 job/s、需 pub/sub 扇出、或已为缓存跑 Redis 时才值——本项目都不沾。
-
-**选 procrastinate**（已核实，context7 `/procrastinate-org/procrastinate`）：
-- PostgreSQL-backed、**asyncio 原生**（`PsycopgConnector` / `run_worker_async` / `defer_async`），与 FastAPI（async）契合。
-- 自带：重试 + 退避、cron 定时、`LISTEN/NOTIFY` 低延迟唤醒、job 锁、worker。等于把「手搓 reaper + 重试列」打包好。
-- **原子入队**：`task.configure(connection=conn).defer(...)` 可与业务写同事务提交——`/ingest` 存采集结果与「入队后处理 job」一起原子落库，不丢任务。
-- 自带 schema（独立表），经其 migrations 或 `SchemaManager` 应用。
-
-**管线落地形态**：
-```
-扩展抓取 ─POST─▶ /sourcing/ingest
-                  └─ 存原始采集结果（RLS）+ defer 后处理 job（同事务）
-procrastinate worker（复用 app/workers/main.py，去 Temporal）:
-  task: post_process(tenant_id, batch_id)
-    → 评分(Qwen) → 翻译(studio) → 图片质检 → 妙手上架/入采集箱
-    → 失败 task 级 retry+退避；达上限标 failed
-```
-
-**两个落地约束（实现时必守）**：
-1. **租户上下文显式传参**：procrastinate worker 跨进程，和旧 Temporal activity 同理——`tenant_id` 必须作为 job 参数贯穿 task 与所有 DB 调用，**禁靠 ContextVar**；task 内显式 `set_config('app.current_tenant', tenant_id)` 再走 RLS。procrastinate 自己的表不参与租户隔离（它是基建）。
-2. **连接器/投递**（已查实定案，详 `docs/sourcing-client-migration.md` ADR-001）：procrastinate 无 async-SQLAlchemy/asyncpg 连接器（唯一 SQLAlchemy 连接器是 psycopg2 同步），**真·单事务原子 defer 不可行**。改用「业务表 `post_status` 列当 outbox + procrastinate cron 兜底重投」实现 at-least-once、零丢失。业务写仍走 asyncpg/RLS，procrastinate 用 `PsycopgConnector`(psycopg3)。
-
-**迁移步骤**：① 加 procrastinate 依赖 + 应用其 schema（新 alembic 版本或其自带 migrations）；② `post_process` task 实现（吸收旧 `ingest_1688_urls` 的评分/top_n/翻译/上架逻辑）；③ `app/workers/main.py` 去 Temporal、改跑 procrastinate worker；④ `compose.yaml` 移除 temporal 服务；⑤ 删 `sourcing/workflows.py` + `activities.py` 的 Temporal 编排（保留被复用的纯业务逻辑）。
-
----
-
-## 4. 范围 Scope
-
-**In**
-- 浏览器扩展「1688 采集助手」：在登录态 1688 抓详情，本地批量队列，结果 POST 服务端。
-- 服务端 `/sourcing/ingest`：收扩展回传 → 存库（RLS）+ defer procrastinate 后处理 job。
-- procrastinate 后处理 task：评分 → 翻译 → 妙手上架/采集箱。对齐旧 `ingest_1688_urls` 语义（threshold/top_n/违禁词/翻译/list_tiktok）。
-- 移除 Temporal：删 workflow/activity 编排 + compose temporal 服务；worker 改 procrastinate。
-
-**Out**
-- rules_kb 采集、chat 重构、auth/RLS。
-- 弃妙手 / 自建 fetch_item·采集箱·TikTok 上架（已决定保留妙手）。
-- 后处理客户端化（已决定留服务端）。
-
----
-
-## 5. 命令 Commands
-
-**后端**
 ```bash
-docker compose up -d                 # db(5433)；temporal 服务移除
-uv run alembic upgrade head          # 含 procrastinate schema（新版本或其自带 migrations）
-uv run uvicorn app.main:app --reload --port 8000
-uv run python -m app.workers.main    # procrastinate worker（替代 Temporal worker）
-uv run pytest -q
-```
+# 迁移（建 rules_kb 表 + 扩展 + 索引）
+uv run alembic upgrade head
 
-**扩展（新增 `client/` 目录，待建）**
-```bash
-cd client && pnpm install
-pnpm dev          # 扩展开发模式（watch 构建到 dist/，浏览器加载 unpacked）
-pnpm build        # 打包扩展
-pnpm test         # 扩展单测（抓取解析器、队列状态机）
-pnpm lint
-```
+# 灌库：jsonl → embed → upsert（幂等，按 rule_id ON CONFLICT DO UPDATE）
+uv run python scripts/load_rules_kb.py            # 全量
+uv run python scripts/load_rules_kb.py --platform amazon   # 单平台（可选）
 
----
+# 测试
+uv run pytest tests/test_rules_kb_search.py       # 离线契约（jsonl 回退路径）
+uv run pytest tests/test_rules_kb_pgvector.py     # DB 集成（需 Postgres+pgvector）
 
-## 6. 项目结构
-
-```
-client/                         # ★ 新增：浏览器扩展「1688 采集助手」
-├── manifest.json               #   MV3；host_permissions 限 1688 域
-├── src/
-│   ├── content/                #   注入 1688 页：DOM 抓取 + 采集面板 UI
-│   │   ├── scrape.ts           #   详情解析器（标题/价/图/SKU），对标妙手字段
-│   │   └── panel.ts            #   采集面板（选择/批量/进度）
-│   ├── background/             #   MV3 service worker：本地队列 + 限频 + 重试
-│   │   └── queue.ts            #   采集任务状态机（替代 Temporal 编排，弱持久=storage）
-│   ├── api/                    #   回传服务端 + 鉴权（带 JWT）
-│   └── lib/clean.ts            #   违禁词清洗（与服务端词库同源）
-└── tests/
-
-app/domains/sourcing/           # 后端：从「编排爬取」转「收结果存库 + 入队后处理」
-├── router.py                   #   + POST /sourcing/ingest（扩展回传入口，存库 + defer job）
-├── service.py                  #   ingest 落库；评分/翻译/上架移到 tasks
-├── tasks.py                    #   ★ 新：procrastinate task post_process（吸收旧 ingest_1688_urls 逻辑）
-├── ingest.py                   #   ★ 新：评分/top_n/违禁词清洗（纯逻辑，task 调用）
-└── workflows.py / activities.py#   ✂ 删 Temporal 编排；保留可复用的纯业务逻辑
-
-app/workers/main.py             # ✂ 去 Temporal worker → 跑 procrastinate run_worker_async
-app/shared/queue/               # ★ 新：procrastinate App 实例 + 连接器 + 租户上下文包装
-app/domains/box/                # 采集箱：经妙手（保留），本地仅存元数据/状态
-compose.yaml                    # ✂ 移除 temporal 服务
-docs/sourcing-client-migration.md  # ★ 落地设计 + 连接器/原子defer 决策（ADR）
+# 跑服务
+uv run uvicorn app.main:app --reload
 ```
 
 ---
 
-## 7. 代码风格
+## 4. 项目结构（改动清单）
 
-- 后端：沿用本仓库纪律——按业务域分包、禁跨域读表、租户上下文走 `tenant/middleware` + RLS，业务码不写 `WHERE tenant_id`。
-- 扩展：TypeScript + MV3；内容脚本只读 DOM 不调 LLM（合规红线）；抓取解析器纯函数、可单测；网络请求带 JWT、限频、指数退避重试。
-- 字段契约：扩展回传的商品 schema 与服务端 `StartCollectRequest`/采集箱模型对齐，单一来源（共享 `contract.ts` 风格定义），禁两端漂移（参考现有 chat contract 漂移教训）。
+```
+新增：
+  migrations/versions/0004_rules_kb.py        # 建 rules_kb 表 + vector 扩展 + hnsw 索引
+  app/domains/rules_kb/models.py              # ORM：RulesKbRow（无 tenant_id/RLS）
+  app/domains/rules_kb/repository.py          # search_filtered() 向量+过滤 SQL
+  scripts/load_rules_kb.py                    # jsonl → embed → upsert 灌库
+  tests/test_rules_kb_pgvector.py             # DB 集成测试（混合检索/隔离）
 
----
-
-## 8. 测试策略
-
-- **扩展单测**：详情解析器喂固定 1688 HTML 夹具 → 断言字段；本地队列状态机（pending→fetching→done/failed、限频、重试）。
-- **后端**：`/sourcing/ingest` 评分/top_n/违禁词清洗回归（对标旧 `ingest_1688_urls`）；RLS 隔离（扩展 A 回传不污染租户 B）；真 HTTP e2e。
-- **procrastinate task 测试**：`post_process` 用 procrastinate 的内存/测试连接器（`InMemoryConnector`）单测——评分/翻译/上架管线 + 重试行为，不起真 worker。
-- **去 Temporal 回归**：删 workflow 后，sourcing 全链路（ingest→入队→存库）e2e 通过；现 `force_degraded` fixture 的「无 Temporal 也能跑」语义可复用/改写为「ingest 直存」断言。
-- **合规测试**：断言内容脚本 host 权限仅限 1688 域；断言不抓登录后台越权字段。
-- LLM 仍用替身（mock gateway），其余真跑。
-
----
-
-## 9. 边界 Boundaries
-
-**Always（必做）**
-- 抓取仅限**用户本店授权可见**的 1688 货源数据（`docs/chat-redesign-plan.md:73` 合规边界）。
-- 扩展内容脚本 `host_permissions` 收窄到 1688 域；只读 DOM，**不在浏览器调 LLM**。
-- 回传带 JWT，服务端按 RLS 存库；沿用 user_id 归属 / tenant 隔离模型。
-- procrastinate task **显式传 `tenant_id`**、task 内 `set_config` 设租户再走 RLS（禁 ContextVar，同旧 Temporal activity 纪律）。
-- 删 Temporal 前确认无其他长流程依赖（publishing 占位 workflow）；连接器/原子-defer 方案先写 ADR（`docs/sourcing-client-migration.md`）再动代码。
-
-**Ask first（先问）**
-- 扩展分发方式（内部 unpacked / 企业私有 / 应用商店）——影响 manifest 与更新机制。
-- procrastinate 连接器选型（SQLAlchemy 连接器做原子 defer vs 自有连接小事务）。
-- 扩展本地队列丢任务（浏览器关闭/崩溃）的可接受度，是否要服务端「采集意图」兜底登记。
-
-**Never（禁止）**
-- 不抓登录态后台的越权/他人数据；不绕平台风控做未授权批量爬取。
-- 不把 1688 原文整段转储入库（与 rules_kb 红线一致：只存提炼/结构化结果）。
-- 不在扩展硬编码任何密钥（DashScope/妙手/center）。
-- 不合并 sourcing 与 rules_kb 两套「采集」。
-- 不为这套低频后处理引 Redis/独立 broker（PG/procrastinate 足够）。
+改：
+  app/domains/rules_kb/service.py             # search() 内分流：主走 pgvector 混合，
+                                              #   session=None/表空回退 jsonl；
+                                              #   抽出共享 helper（_score/_apply_filters/RRF）
+  app/shared/llm/embeddings.py                # embed_text 改走 litellm SDK→DashScope
+  app/core/config.py                          # +embedding_model/embedding_dim；
+                                              #   rules_kb_path 注释更新（不再标弃用，作回退源）
+  pyproject.toml                              # pgvector pin 收紧（如需）
+```
 
 ---
 
-## 10. 决策记录 + 剩余待决
+## 5. 代码风格（Code Style）
 
-**已定（本轮拍板）**
-1. ~~妙手去留~~ → **保留**妙手（fetch_item 深采 / 采集箱 / TikTok 上架）。
-2. ~~后处理位置~~ → **留服务端**（评分/翻译/上架，借 RLS+计费+可观测）。
-3. ~~Temporal 去留~~ → **移除**，换 procrastinate（PG 队列）。
-4. ~~队列方案~~ → **procrastinate**（PG，无 Redis）。
-
-**已查实定案**（详 `docs/sourcing-client-migration.md`）
-- A. ~~连接器/原子 defer~~ → procrastinate 无 asyncpg/async-SQLAlchemy 连接器，原子 defer 不可行 → **outbox 状态列 + cron 兜底**（ADR-001）。
-- C. ~~扩展弱持久~~ → 抓取阶段弱持久可接受，回传即落库持久，不做服务端意图预登记（ADR-003）。
-
-**ADR-002 已查实定论**（反推妙手 CLI 11 个调用点 + `tk_list_items`）
-- 妙手**不接受外部商品数据**：上架按采集箱 box-id 驱动，箱内条目只能由妙手 `url`/`save` 自抓 1688 生成。「扩展抓 detail → 妙手上架」**不可行**。
-- → 扩展职责锁定 = **登录态采集 offer URL（过风控）**；妙手保留 fetch+box+上架（同旧 `ingest_1688_urls`）。ingest 契约回传 **URL 列表**。
-
-**剩余待决**
-- 🚩 **妙手 `url` fetch 风控验证（T0，上线前实测）**：若妙手自抓详情也撞风控，妙手吃不了外部数据 → 整方案重议。属实测非设计阻塞。
-- B. 扩展分发（unpacked / 企业私有 / 商店）+ JWT 注入方式。
-- D. publishing 占位 `BulkPublishWorkflow` 删 Temporal 后归宿（procrastinate task 或暂搁）。
+- 跟随现仓：domain 分层 service/repository/models，跨域只调对方 service。
+- repository **不写** `WHERE tenant_id`——rules_kb 全局表无 RLS，但 platform/site
+  过滤**必须**显式写进 SQL（这是业务隔离，非 RLS）。
+- 中文注释，解释「为什么」而非「做什么」，与现有文件密度一致。
+- 类型注解齐全；async 全程；`list[dict[str, Any]]` 等现有风格。
+- 不引新依赖（pgvector/litellm/sqlalchemy 已在）。RRF 纯 Python 实现，~10 行。
 
 ---
 
-*下一步：本 SPEC 已据四项决策定稿。细化 `docs/sourcing-client-migration.md`（连接器 ADR + task 设计 + 扩展 manifest）+ 任务分解，即可进 `/plan`。*
+## 6. 测试策略（Testing Strategy）
+
+- **离线契约（不动现有文件语义）**：`test_rules_kb_search.py` 继续用 `session=None`
+  跑 jsonl 回退路径，全部 9 条断言保持绿（metadata 隔离 / 溯源字段 / 空检索 /
+  GLOBAL site / limit）。这是回退路径的回归网。
+- **DB 集成（新增）**：`test_rules_kb_pgvector.py` 真连 Postgres，先灌小样本，验证：
+  - 语义召回：换词查询（如「店铺被关」vs 语料「封号」）向量能命中、纯词法漏。
+  - platform/site 硬隔离在 SQL 路径同样成立（amazon 查询绝不返 ozon）。
+  - RRF：词法精确命中仍排前；融合不破坏 _RETURN_FIELDS 契约。
+  - 表空 → 回退 jsonl，不抛错。
+  - 无 DB 环境用 pytest marker / fixture skip（对齐现有 DB 测试惯例）。
+- **embeddings**：embed_text 改造后，knowledge_base 既有路径不回归（若有相关测试）。
+
+---
+
+## 7. 边界（Boundaries）
+
+**永远（Always）**
+- 保 `search()` 签名 + `_RETURN_FIELDS` 投影不变（只暴露这些，不泄 content 全文）。
+- platform/site 硬隔离 + GLOBAL site 适配任意 site 查询。
+- embedding 唯一经 litellm SDK→DashScope；维度对齐 1024（与 kb_chunks 一致）。
+- rules_kb 为全局共享表，无 tenant_id、无 RLS。
+- 空/无 DB 优雅回退 jsonl，离线契约测试恒绿。
+
+**先问（Ask first）**
+- 改 embedding 维度（连带影响 kb_chunks 表与 0002 迁移）。
+- 删除 jsonl 回退路径或 `rules_kb_path` 配置。
+- 引入 PG 中文分词扩展（zhparser/pg_bigm）做真 BM25（当前用 Python bigram，足够）。
+- 任何触及前端 chat 契约（contract.ts ChatAction）的改动。
+
+**绝不（Never）**
+- rules_kb 改成租户私有 / 套 RLS。
+- 绕过 gateway/embeddings 直连 provider SDK。
+- 让 rules_search 在检索失败时自由生成规则（反幻觉红线）。
+- 把 content 全文/内部字段透给上层或前端。
+
+---
+
+## 8. 已知风险
+
+- **DashScope text-embedding-v3 经 litellm**：需实测 `litellm.aembedding` 对 DashScope
+  兼容端点 + `dimensions=1024` 的支持；若不通，回退方案见「先问」。
+- **混合融合质量**：corpus 仅 524 条，全集载入 Python 融合零压力；规模增长后需把
+  vector top-K 下推 SQL（HNSW 索引已建，改 repository 即可，service 不动）。
+- **灌库一致性**：embedding 用 title+summary+content 拼接；改拼接策略需重灌全量。
