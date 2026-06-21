@@ -1,8 +1,8 @@
 """SourcingService 编排测试。
 
-不依赖真 DB / 真 Temporal：用内存假 repo + 替换 _connect 模拟 Temporal 可达/不可达，
-验证三级降级（temporal / degraded / unavailable）与采集插件 poll/done 路径。
-CollectWorkflow 的活动编排由本地 Temporal 的端到端用例覆盖（计划 §验证 步6-7）。
+不依赖真 DB：用内存假 repo 验 start_collect 落 pending 行（degraded）/ 无 DB（unavailable）+
+采集插件 poll/done 路径 + 跨租户 IDOR（done 前按 RLS 校验归属）。
+（Temporal 已移除；采集后处理走 /ingest→post_process，见 test_post_process.py。）
 """
 import types
 
@@ -86,22 +86,6 @@ class FakeClient:
 
 # ---- start_collect 三级降级 ----
 
-async def test_start_collect_temporal_mode():
-    client = FakeClient()
-
-    async def connect_ok():
-        return client
-
-    repo = FakeRepo()
-    svc = _svc(repo=repo, connect=connect_ok)
-    res = await svc.start_collect(tenant_id="t1", keywords=["杯子"], per_kw=20, market="my")
-
-    assert res["mode"] == "temporal"
-    assert res["job_id"]
-    assert client.started is not None  # workflow 已启动
-    assert repo.jobs == {}  # temporal 模式不直接写库（由 activity 落行）
-
-
 async def test_start_collect_degraded_writes_row():
     repo = FakeRepo()
     svc = _svc(repo=repo, connect=_connect_fail)
@@ -135,21 +119,6 @@ async def test_claim_next_serializes_and_marks_collecting():
 
     # 队列空 → None
     assert await svc.claim_next_job() is None
-
-
-async def test_complete_job_temporal_signals_workflow():
-    client = FakeClient()
-
-    async def connect_ok():
-        return client
-
-    repo = FakeRepo()
-    await repo.create_job(job_id="j1", keywords=[], per_kw=10, market=None)  # 本租户拥有
-    svc = _svc(repo=repo, connect=connect_ok)
-    res = await svc.complete_job("j1", {"items": [1, 2]})
-
-    assert res == {"ok": True, "mode": "temporal"}
-    assert client.handle.signaled == ("browser_done", {"items": [1, 2]})
 
 
 async def test_complete_job_foreign_job_not_signaled(monkeypatch):

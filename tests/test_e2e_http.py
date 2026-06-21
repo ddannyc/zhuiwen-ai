@@ -59,21 +59,6 @@ def mock_llm(monkeypatch):
     monkeypatch.setattr(agent_mod, "chat_with_tools", fake_cwt)
 
 
-@pytest.fixture
-def force_degraded(monkeypatch):
-    """sourcing e2e 锁定降级路径：本套只验「API 同步直写库 + RLS」语义，与是否有
-    Temporal/worker 在跑无关。CollectWorkflow 由 test_sourcing_workflow.py 用
-    time-skipping 单独覆盖。compose 现默认起 temporal，但 pytest 不起 worker——
-    若不锁降级，collect 会启动一个永挂的 workflow（activity 无 worker 执行、行不落库），
-    断言全崩。patch _connect 抛错 → start_collect/complete_job 必走降级分支。"""
-    import app.domains.sourcing.service as svc
-
-    async def _no_temporal(self):
-        raise ConnectionError("forced degraded in e2e")
-
-    monkeypatch.setattr(svc.SourcingService, "_connect", _no_temporal)
-
-
 def _client():
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
 
@@ -160,7 +145,7 @@ async def test_ownership_isolation_same_tenant(mock_llm):
         assert all(conv["title"] != "alice私有" for conv in bob_list)
 
 
-async def test_sourcing_lifecycle_and_rls(force_degraded):
+async def test_sourcing_lifecycle_and_rls():
     """sourcing 采集任务全生命周期（真 PG + RLS，强制降级直写库）：
     collect→pending→poll 认领(collecting)→done(collected+result)。poll 走
     claim_next + _serialize，正是 func.now() MissingGreenlet 回归点。
@@ -196,7 +181,7 @@ async def test_sourcing_lifecycle_and_rls(force_degraded):
         assert (await c.get(f"/sourcing/jobs/{jid}", headers=other)).status_code == 404
 
 
-async def test_sourcing_done_foreign_job_404_no_mutation(force_degraded):
+async def test_sourcing_done_foreign_job_404_no_mutation():
     # 评审 blocker 回归（跨租户写路径）：租户B 不能对租户A 的 job /done。
     # 既挡 Temporal 直签 IDOR，也证 RLS 写路径不漏。断言 A 的 job 未被改动。
     alice = {"Authorization": f"Bearer {_token()}"}

@@ -39,9 +39,10 @@
 
 ## Phase 5 — 去 Temporal
 - [x] T5.1 `workers/main.py` 改 procrastinate `run_worker_async`（含 cron periodic 生效）
-- [ ] T5.2 删残留：workflows/activities(Temporal 部分)、config temporal_*、compose temporal、pyproject temporalio、test_sourcing_workflow.py、README
-- [ ] T5.3 `test_e2e_http.py` sourcing 用例改写（ingest→存→InMemory task→done）
-- [ ] **✅ C5**：pytest 全绿且不起 temporal；`grep -rn temporalio app/` 空；compose 仅 db
+- [x] T5.2 删残留：workflows/activities、config temporal_*、compose temporal、pyproject temporalio、
+      test_sourcing_workflow.py、README；service start_collect/complete_job 改降级直写（保 chat poll/done UX）
+- [x] T5.3 测试改写：删 2 个 temporal-mode 单测 + force_degraded fixture（degraded 现为唯一路径）
+- [x] **✅ C5**：pytest 全绿（87）；temporalio 不可导入；compose 仅 db；app 无 temporal 引用
 
 ## Phase 6 — 扩展端 client/
 - [ ] T6.1 MV3 manifest(host 仅 1688) + `scrape.ts` URL 采集器（夹具可测）+ panel

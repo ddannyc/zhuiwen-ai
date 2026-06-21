@@ -2,25 +2,20 @@
 
 跨域只准调它（如 chat 的 collect_products 工具），外部不碰本域 repository/表。
 
-降级纪律：chat 请求触发采集时若 Temporal 不可达，不应让对话失败。
-start_collect 三级回退：
-  temporal    —— 正常：启 CollectWorkflow，由其 activity 落 pending 行；
-  degraded    —— Temporal 连不上：用请求 session 直接写 pending 行，插件照样能 poll；
-  unavailable —— 连库也写不进（如无 DB 的单测）：仅返回 job_id，如实标记未持久化。
-无论哪级都返回 job_id，保证 chat 路径不阻塞、前端有据可渲染。
+两条采集路径：
+  ① chat 关键词下发：start_collect 落 pending 行 → 采集插件 poll/done（旧插件模型）；
+  ② 扩展 URL 回传：ingest 落批 + defer post_process（妙手 fetch→评分→翻译→上架，新模型）。
+均返回结果保证 chat 路径不阻塞、前端有据可渲染。
 """
-import asyncio
 import logging
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.domains.sourcing.models import COLLECTED, POST_PENDING, POST_QUEUED, CollectJob
 from app.domains.sourcing.repository import SourcingRepository
 
 log = logging.getLogger(__name__)
-_settings = get_settings()
 
 
 class SourcingService:
@@ -58,30 +53,16 @@ class SourcingService:
 
     async def start_collect(self, *, tenant_id: str | None, keywords: list[str],
                             per_kw: int = 10, market: str | None = None) -> dict:
+        """chat 下发关键词采集任务：直接落 pending 行（RLS 由中间件已设的租户上下文兜底）。
+        采集插件经 /jobs/poll 认领、/jobs/{id}/done 回结果。无可用 DB 时如实标未持久化。
+        （旧版的 Temporal 编排已移除；采集后自动评分/翻译/上架迁到 /ingest→post_process。）"""
         job_id = str(uuid.uuid4())
-        params = {"keywords": keywords, "per_kw": per_kw, "market": market}
         base = {"job_id": job_id, "keywords": keywords, "per_kw": per_kw, "market": market}
-
-        # 1) 正常：启 Temporal workflow（workflow_id = job_id，便于 /done 按 id 发信号）。
-        try:
-            client = await self._connect()
-            from app.domains.sourcing.workflows import CollectWorkflow
-            await client.start_workflow(
-                CollectWorkflow.run, args=[tenant_id, job_id, params],
-                id=job_id, task_queue=_settings.sourcing_task_queue,
-            )
-            return {**base, "mode": "temporal"}
-        except Exception as e:  # 连不上/启动失败 → 降级，不让 chat 失败
-            log.warning("Temporal 不可达，采集任务降级直写库: %s", e)
-
-        # 2) 降级：用请求 session 直接落 pending 行（RLS 由中间件已设的租户上下文兜底）。
         try:
             await self.repo.create_job(job_id=job_id, keywords=keywords, per_kw=per_kw, market=market)
             return {**base, "mode": "degraded"}
-        except Exception as e:
-            log.warning("采集任务降级写库失败（无可用 DB？）: %s", e)
-
-        # 3) 兜底：仅返回 job_id，如实告知未持久化。
+        except Exception as e:  # noqa: BLE001 —— 无 DB 时不让 chat 失败
+            log.warning("采集任务写库失败（无可用 DB？）: %s", e)
         return {**base, "mode": "unavailable"}
 
     async def claim_next_job(self) -> dict | None:
@@ -90,37 +71,18 @@ class SourcingService:
         return _serialize(job) if job else None
 
     async def complete_job(self, job_id: str, result: dict) -> dict:
-        """采集插件 /done 回结果：优先给 workflow 发信号续跑后处理；
-        Temporal 不可达则降级直接把任务标 collected。
+        """采集插件 /done 回结果：标 collected 落 result。
 
-        安全：必须先按 RLS 校验归属再签发。Temporal workflow handle 按 job_id 在
-        全局命名空间查找、不受 RLS 约束——若不先校验，跨租户可拿他人 job_id 直接
-        signal，把伪造 result 注入他人采集管线（IDOR）。get_job 走 RLS：查不到
-        （他租户不可见 / 非法 id）即归属不符 → not_found，绝不下发信号。"""
+        安全：先按 RLS 校验归属（get_job 走 RLS，他租户不可见 / 非法 id → not_found），
+        防跨租户用他人 job_id 注入伪造结果（IDOR）。"""
         if await self.repo.get_job(job_id) is None:
             return {"ok": False, "mode": "not_found"}
-        try:
-            client = await self._connect()
-            handle = client.get_workflow_handle(job_id)
-            await handle.signal("browser_done", result)
-            return {"ok": True, "mode": "temporal"}
-        except Exception as e:
-            log.warning("Temporal 信号失败，降级直更任务状态: %s", e)
-
         job = await self.repo.mark(job_id, COLLECTED, result=result)
         return {"ok": job is not None, "mode": "degraded"}
 
     async def get_job(self, job_id: str) -> dict | None:
         job = await self.repo.get_job(job_id)
         return _serialize(job) if job else None
-
-    async def _connect(self):
-        # 探活带超时，避免 Temporal 宕机时 chat 请求被长时间阻塞。
-        from temporalio.client import Client
-        return await asyncio.wait_for(
-            Client.connect(_settings.temporal_host),
-            timeout=_settings.temporal_connect_timeout,
-        )
 
 
 def _serialize(job: CollectJob) -> dict:

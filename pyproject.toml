@@ -20,8 +20,6 @@ dependencies = [
     "pyjwt>=2.8", # import jwt
     # --- Agent 编排 ---
     "langgraph>=0.2",
-    # --- 长流程（sourcing 域 CollectWorkflow，计划 §3）---
-    "temporalio>=1.6",
     "alembic>=1.18.4",
     "psycopg[binary]>=3.3.4",
     "litellm>=1.89.2",

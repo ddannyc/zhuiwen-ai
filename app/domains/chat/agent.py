@@ -231,8 +231,8 @@ def _make_tool_impls(box: BoxService, rules: RulesKbService, sourcing: SourcingS
         return _format_rules(hits), {"type": "rules_search", "empty": not hits, "cites": cites}
 
     async def t_collect_products(a: dict):
-        # 触发 sourcing 域采集（Temporal CollectWorkflow；不可达则降级写库，见 SourcingService）。
-        # tenant_id 必须显式贯穿到 Temporal（跨进程，不能靠 ContextVar）——从请求态取。
+        # 触发 sourcing 域采集（落 pending 行，采集插件 poll/done 接力；见 SourcingService）。
+        # tenant_id 从请求态取，显式传给 service（RLS 由会话 GUC 兜底）。
         kws = a.get("keywords") or []
         per_kw = int(a.get("perKw", a.get("per_kw", 10)))
         market = a.get("market")

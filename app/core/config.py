@@ -45,13 +45,6 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://localhost:4000"
     litellm_master_key: str = "change-me"
 
-    # --- Temporal (sourcing 采集长流程) ---
-    temporal_host: str = "localhost:7233"
-    sourcing_task_queue: str = "sourcing"
-    # Temporal 不可达时 sourcing 走降级：直接写 pending job 行，chat 路径不阻塞、
-    # 采集插件仍可经 /sourcing/jobs/poll 取任务。生产应保证 Temporal 可用以获得
-    # durable/重试/断点恢复。连接探活超时（秒），避免 chat 请求被长时间阻塞。
-    temporal_connect_timeout: float = 3.0
 
     # --- 妙手 Miaoshou (sourcing：1688 采集 / 采集箱 / TikTok 上架 SaaS) ---
     # 经 select.py（开发）或编译二进制 zhuiwen-select（盒子）CLI 调用；
