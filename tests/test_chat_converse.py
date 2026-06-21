@@ -44,28 +44,39 @@ def _tool_call(name, args):
          "function": {"name": name, "arguments": json.dumps(args)}}]}
 
 
-def _final(text):
-    return {"role": "assistant", "content": text, "tool_calls": []}
+def _answer_call():
+    """路由到 answer 标记工具（方案B）：表示"直接答"，终答由 chat 生成。"""
+    return {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "call-a", "type": "function",
+         "function": {"name": "answer", "arguments": "{}"}}]}
 
 
 @pytest.fixture
 def captured(monkeypatch):
-    calls: list[list[dict]] = []
-    responses: list[dict] = []
-    choices: list = []  # 每次调用的 tool_choice（验合规召回闸强制）
+    from app.domains.chat.prompts import _TITLE_SYS
+
+    calls: list[list[dict]] = []       # 每次 chat_with_tools(路由) 的 messages
+    responses: list[dict] = []         # 路由决策序列（_tool_call/_answer_call）；耗尽则默认 answer
+    choices: list = []                 # 每次路由的 tool_choice（验合规召回闸强制）
+    chat_answers: list[str] = []       # 终答 chat 生成的文本队列（耗尽给默认）
 
     async def fake_cwt(messages, tools, model="x", tool_choice=None, **kw):
         calls.append([dict(m) for m in messages])
         choices.append(tool_choice)
-        return responses[len(calls) - 1]
+        i = len(calls) - 1
+        return responses[i] if i < len(responses) else _answer_call()
 
-    async def fake_chat(messages, model="x", **kw):  # _gen_title 用，避免真打网络
-        return "测试标题"
+    async def fake_chat(messages, model="x", **kw):
+        sys = messages[0].get("content", "") if messages else ""
+        if sys == _TITLE_SYS:           # 标题生成
+            return "测试标题"
+        return chat_answers.pop(0) if chat_answers else "（生成的终答）"  # 终答生成
 
     monkeypatch.setattr("app.domains.chat.agent.chat_with_tools", fake_cwt)
     monkeypatch.setattr(service_mod, "chat", fake_chat)
     monkeypatch.setattr(service_mod, "ChatRepository", FakeRepo)
-    return types.SimpleNamespace(calls=calls, responses=responses, choices=choices)
+    return types.SimpleNamespace(calls=calls, responses=responses, choices=choices,
+                                 chat_answers=chat_answers)
 
 
 def _service():
@@ -75,7 +86,6 @@ def _service():
 # ---- converse：结构化 action ----
 async def test_converse_rules_search_structured_action(captured):
     captured.responses.append(_tool_call("rules_search", {"query": "取消率封号", "platform": "ozon"}))
-    captured.responses.append(_final("根据知识库，取消率超 40% 会被封 3 天。"))
 
     out = await _service().converse("conv-1", "Ozon 取消率多少会被封号")
 
@@ -90,20 +100,19 @@ async def test_converse_rules_search_structured_action(captured):
 
 async def test_converse_rules_search_empty_no_hallucination(captured):
     captured.responses.append(_tool_call("rules_search", {"query": "玩具含磁铁", "platform": "amazon"}))
-    captured.responses.append(_final("（基于未找到的安全回答）"))
 
     out = await _service().converse("conv-1", "亚马逊美国站玩具能卖含磁铁吗")
 
     assert out["action"]["type"] == "rules_search"
     assert out["action"]["empty"] is True
     assert out["action"]["cites"] == []
-    tool_msgs = [m for m in captured.calls[1] if m.get("role") == "tool"]
-    assert "未找到" in tool_msgs[0]["content"] and "来源" not in tool_msgs[0]["content"]
+    # 空检索事前定：不生成终答，确定性覆盖为安全话术（不臆测）。
+    from app.domains.chat.agent import EMPTY_RULES_FALLBACK
+    assert out["reply"] == EMPTY_RULES_FALLBACK
 
 
 async def test_converse_box_list_payload(captured):
     captured.responses.append(_tool_call("box_list", {"limit": 10}))
-    captured.responses.append(_final("采集箱前 10 个……"))
 
     out = await _service().converse("conv-1", "列出采集箱前10个")
     assert out["action"]["type"] == "box_list"
@@ -112,7 +121,6 @@ async def test_converse_box_list_payload(captured):
 
 async def test_converse_collect_products_job_id(captured):
     captured.responses.append(_tool_call("collect_products", {"keywords": ["杯子"], "perKw": 20}))
-    captured.responses.append(_final("已下发采集任务……"))
 
     out = await _service().converse("conv-1", "按马来西亚蓝海自动采集每词20个")
     assert out["action"]["type"] == "collect_products"
@@ -121,8 +129,8 @@ async def test_converse_collect_products_job_id(captured):
 
 async def test_converse_scrubs_leaked_tool_plan(captured):
     # 模型把内部工具名/参数/调用计划当回复吐出 → 必须被兜底替换，不泄露给用户。
-    captured.responses.append(_final(
-        '请立即调用 rules_search 工具，"query": "玩具 磁铁 认证"，是否需要我帮你发起该查询？'))
+    captured.chat_answers.append(
+        '请立即调用 rules_search 工具，"query": "玩具 磁铁 认证"，是否需要我帮你发起该查询？')
     out = await _service().converse("conv-1", "玩具磁铁能卖吗")
     assert "rules_search" not in out["reply"]
     assert '"query"' not in out["reply"]
@@ -133,14 +141,13 @@ async def test_converse_scrubs_leaked_tool_plan(captured):
 async def test_compliance_query_forces_rules_search(captured):
     # 合规召回闸：含合规信号的问题，首轮强制 tool_choice=rules_search（不让模型漏路由）。
     captured.responses.append(_tool_call("rules_search", {"query": "促销规则", "platform": "ozon"}))
-    captured.responses.append(_final("依据知识库……"))
     await _service().converse("conv-1", "ozon 促销有什么规则要注意")
     assert captured.choices[0] == {"type": "function", "function": {"name": "rules_search"}}
 
 
 async def test_false_citation_scrubbed(captured):
     # 假引用闸：模型没真检索（action=answer）却声称"官方规则库" → 替换为安全话术。
-    captured.responses.append(_final("根据 Ozon 官方规则库，促销折扣不得低于 85%。"))
+    captured.chat_answers.append("根据 Ozon 官方规则库，促销折扣不得低于 85%。")
     out = await _service().converse("conv-1", "随便聊聊天气")  # 无合规词 → 不强制
     assert out["action"] == {"type": "answer"}
     assert "官方规则库" not in out["reply"]
@@ -148,28 +155,25 @@ async def test_false_citation_scrubbed(captured):
 
 
 async def test_converse_clean_reply_not_scrubbed(captured):
-    captured.responses.append(_final("美国市场宠物用品蓝海明显，建议聚焦智能喂食器。"))
+    captured.chat_answers.append("美国市场宠物用品蓝海明显，建议聚焦智能喂食器。")
     out = await _service().converse("conv-1", "选品建议")
     assert out["reply"] == "美国市场宠物用品蓝海明显，建议聚焦智能喂食器。"
 
 
 async def test_converse_plain_answer(captured):
-    captured.responses.append(_final("选品思路……"))
+    captured.chat_answers.append("选品思路……")
     out = await _service().converse("conv-1", "给点选品思路")
     assert out["action"] == {"type": "answer"}
     assert out["reply"] == "选品思路……"
 
 
 async def test_first_message_generates_title(captured):
-    captured.responses.append(_final("答1"))
     svc = _service()
     await svc.converse("conv-1", "第一条消息")
     assert svc.repo.title == "测试标题"  # 首条触发 LLM 标题
 
 
 async def test_second_message_does_not_regenerate_title(captured):
-    captured.responses.append(_final("答1"))
-    captured.responses.append(_final("答2"))
     svc = _service()
     await svc.converse("conv-1", "第一条")
     svc.repo.title = "SENTINEL"          # 标记，第二条不应覆盖
@@ -193,7 +197,6 @@ async def test_history_uses_recent_not_earliest(captured):
 
 async def test_converse_persists_user_and_assistant(captured):
     captured.responses.append(_tool_call("rules_search", {"query": "费用", "platform": "ozon"}))
-    captured.responses.append(_final("依据知识库……"))
 
     svc = _service()
     await svc.converse("conv-1", "Ozon 佣金多少")
@@ -208,7 +211,6 @@ async def test_converse_stream_empty_rules_no_token(captured):
     """空检索：流式不发 token——守卫文案由前端 RuleCiteCard(empty) 渲，避免与流式文本
     两条「未找到」重叠/覆盖（用户报的 bug）。"""
     captured.responses.append(_tool_call("rules_search", {"query": "玩具含磁铁", "platform": "amazon"}))
-    captured.responses.append(_final("（安全回答）"))
 
     events = [ev async for ev in _service().converse_stream("conv-1", "亚马逊玩具含磁铁能卖吗")]
     names = [e["event"] for e in events]
@@ -221,7 +223,6 @@ async def test_converse_stream_empty_rules_no_token(captured):
 
 async def test_converse_stream_event_order(captured):
     captured.responses.append(_tool_call("rules_search", {"query": "费用", "platform": "ozon"}))
-    captured.responses.append(_final("依据知识库……" * 3))
 
     events = [ev async for ev in _service().converse_stream("conv-1", "Ozon 佣金")]
     names = [e["event"] for e in events]
@@ -242,7 +243,7 @@ async def test_converse_stream_event_order(captured):
 
 async def test_converse_stream_token_reassembles_reply(captured):
     full = "这是一段较长的回复用于验证 token 切块能拼回原文。" * 2
-    captured.responses.append(_final(full))
+    captured.chat_answers.append(full)
 
     events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
     tokens = "".join(e["data"]["delta"] for e in events if e["event"] == "token")
@@ -280,7 +281,6 @@ async def test_collect_products_passes_market_through(captured):
 
     captured.responses.append(_tool_call(
         "collect_products", {"keywords": ["杯子"], "perKw": 20, "market": "my"}))
-    captured.responses.append(_final("已下发采集任务……"))
 
     # 用假 SourcingService 注入，避免真连 Temporal/DB
     monkey = types.SimpleNamespace(start_collect=fake_start_collect)

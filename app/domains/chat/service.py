@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.domains.chat.agent import TOOL_LABELS, build_chat_agent
+from app.domains.chat.agent import TOOL_LABELS, prepare
 from app.domains.chat.prompts import (
     ANALYSIS_PROMPTS,
     DEFAULT_ANALYSIS,
@@ -111,34 +111,29 @@ class ChatService:
         # 合规召回闸：命中合规信号 → 首轮强制 rules_search。
         force_tool = "rules_search" if _COMPLIANCE_RE.search(user_message) else None
 
-        agent = build_chat_agent(self.session, model=self.model)
-        final = await agent.ainvoke({
-            "messages": messages, "action": None, "tools_used": [], "reply": "", "rounds": 0,
-            "force_tool": force_tool, "user_message": user_message,
-        })
+        prep = await prepare(self.session, messages, model=self.model,
+                             force_tool=force_tool, user_message=user_message)
 
         if is_first:
             title = await self._gen_title(user_message)
             if title:
                 await self.repo.update_conversation_title(conversation_id, title)
 
-        action = final.get("action") or {"type": "answer"}
-        reply = final.get("reply", "")
-        # 合规硬保障：规则检索为空时，确定性覆盖回复——杜绝模型凭记忆编造平台规则
-        # （弱模型即便拿到"未找到"也可能幻觉，prompt 约束不可靠，故在此强制兜底）。
-        if action.get("type") == "rules_search" and action.get("empty"):
-            reply = "未找到相关平台规则，请以平台最新官方公告为准。（知识库无匹配，不臆测。）"
+        action = prep["action"]
+        # 终答生成：需生成 → gen_messages 调 chat（非流式）；否则用事前定的静态回复（空检索）。
+        if prep["needs_gen"]:
+            reply = await chat(prep["gen_messages"], model=self.model)
+        else:
+            reply = prep["static_reply"] or ""
 
         # 假引用闸：回复声称官方/规则库背书，但本轮没真检索（无 cite）→ 欺骗性幻觉，替换。
         if action.get("type") != "rules_search" and _VERIFY_CLAIM_RE.search(reply):
             reply = _FALSE_CITE_FALLBACK
-
         # 兜底：模型把内部工具名/调用参数/调用计划当回复吐给用户 → 判为泄露，替换为安全话术。
-        # （提示词已禁，但弱模型仍可能漏；用户绝不应看到内部编排过程。）
         if _LEAK_RE.search(reply):
             reply = _LEAK_FALLBACK
 
-        return {"reply": reply, "action": action, "tools_used": final.get("tools_used", [])}
+        return {"reply": reply, "action": action, "tools_used": prep["tools_used"]}
 
     async def _gen_title(self, message: str) -> str:
         """首条消息生成简短标题。失败不抛（标题非关键路径），返回空串跳过。"""

@@ -7,8 +7,8 @@
 - [x] **✅ C0**：逐 delta 产出、拼接完整（mock litellm）
 
 ## Phase 1 — agent 拆 prepare()
-- [ ] T1.1 `agent.prepare()`：路由/工具 与 终答生成解耦；`_run` 复用之
-- [ ] **✅ C1**：prepare 分流正确（需生成 vs 卡片/模板）；既有 chat 测试全绿
+- [x] T1.1 `agent.prepare()`：路由/工具 与 终答生成解耦；`_run` 复用之
+- [x] **✅ C1**：prepare 分流正确（需生成 vs 卡片/模板）；既有 chat 测试全绿
 
 ## Phase 2 — converse_stream 真流式 + 降级 ★MVP
 - [ ] T2.1 真 token 流：needs_gen → chat_stream 逐 delta yield；删 _chunk+sleep
