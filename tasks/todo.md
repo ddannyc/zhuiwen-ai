@@ -9,9 +9,9 @@
 ## Phase 1 — 队列地基
 - [x] T1.1 `app/shared/queue/` procrastinate App(PsycopgConnector) + `tenant_session`
 - [x] T1.2 迁移 `0004_procrastinate`：注入 procrastinate schema（alembic up/down）
-- [ ] T1.3 trivial `ping` task：defer→worker→RLS 隔离验证
+- [x] T1.3 trivial `ping` task：defer→worker→RLS 隔离验证
 - [ ] T1.A（并行）`sourcing/miaoshou.py`：url_fetch/edit/delete/tk_list_items/shops 封装
-- [ ] **✅ C1**：procrastinate worker 起；trivial task defer→执行→RLS 过；alembic up/down 净
+- [x] **✅ C1**：procrastinate worker 起；trivial task defer→执行→RLS 过；alembic up/down 净
 
 ## Phase 2 — ingest 垂直切片 ★MVP
 - [ ] T2.1 迁移 `0005`：collect_jobs 加 post_status/attempts/last_error/source；弃 poll 语义
