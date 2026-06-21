@@ -1,0 +1,37 @@
+# 本地开发数据库：Postgres 17 + pgvector（官方镜像，零自建）。
+# 解锁本地端到端：起库 → alembic 跑 0001-0003 迁移 → uvicorn / worker 实测。
+#
+# 用法：
+#   docker compose up -d            # 起库（首次自动跑 docker/postgres/init/*.sql）
+#   alembic upgrade head            # 跑迁移建表+RLS（env.py 自动用 database_admin_url 超管连接）
+#   uvicorn app.main:app --reload   # API
+#   python -m app.workers.main      # worker（Temporal 未起则降级空转）
+#   docker compose down -v          # 删库重置（重测 RLS 隔离时用）
+#
+# 角色对齐 app/core/config.py：
+#   database_url       = postgresql+asyncpg://app:app@localhost:5432/xborder        （业务连接，受 RLS 约束）
+#   database_admin_url = postgresql+asyncpg://postgres:postgres@localhost:5432/xborder（超管，跑迁移/建策略）
+# zhparser（中文全文）本期不装；P2 上 PG 原生混合检索时再切自建镜像（方案 B）。
+services:
+  db:
+    image: pgvector/pgvector:pg17   # 官方 multi-arch，Apple Silicon 原生 arm64
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: xborder
+    ports:
+      # 映射到宿主 5433，避让本机可能已存在的原生 pg（如 MacPorts 的 127.0.0.1:5432）。
+      # .env 里 DATABASE_URL/DATABASE_ADMIN_URL 同步指向 5433（见 .env.example）。
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # init 脚本仅在数据目录为空（首次）时执行：建 vector 扩展 + app 业务角色。
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d xborder"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
