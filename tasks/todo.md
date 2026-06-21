@@ -15,7 +15,7 @@
 - [x] **✅ C1**：procrastinate worker 起；trivial task defer→执行→RLS 过；alembic up/down 净
 
 ## Phase 2 — ingest 垂直切片 ★MVP
-- [ ] T2.1 迁移 `0005`：collect_jobs 加 post_status/attempts/last_error/source；弃 poll 语义
+- [x] T2.1 迁移 `0005`：collect_jobs 加 post_status/attempts/last_error/source；弃 poll 语义
 - [ ] T2.2 `POST /sourcing/ingest`（收 urls）+ IngestRequest 校验；删旧 /jobs/poll+/done
 - [ ] T2.3 `tasks.post_process`：妙手 fetch + 评分 + 违禁词清洗 + top_n → result
 - [ ] T2.4 `GET /sourcing/jobs/{batch_id}` 返 post_status/result/scores
