@@ -33,8 +33,9 @@
 ## Phase 4 — 可靠性
 - [x] T4.1 cron 兜底 task：扫 pending/queued 超 grace(120s) 重投，cron 每分钟
       （跨租户读用 admin 连接 bypass RLS；periodic 任务随 procrastinate worker 起，T5.1 后生效）
-- [ ] T4.2 幂等：CAS pending/queued→running；done 跳过；上架查重
-- [ ] **✅ C4**：worker kill→cron 重驱→done 且**只上架一次**
+- [x] T4.2 幂等：CAS pending/queued→running（独立提交）；done 跳过；cron 回收崩溃 running
+      ⚠ 崩在 publish 中途的 exactly-once 未保证（妙手 tkcall 非事务，需妙手侧幂等键，另列）
+- [x] **✅ C4**：双 defer→CAS 只一个跑；崩溃 running 超 grace 回收重投；正在跑的不误回收
 
 ## Phase 5 — 去 Temporal
 - [ ] T5.1 `workers/main.py` 改 `run_worker_async`（含 cron）

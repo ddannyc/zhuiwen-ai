@@ -129,15 +129,22 @@ async def requeue_stale_task(timestamp: int) -> None:
 
 @queue_app.task(name="sourcing.post_process")
 async def post_process(batch_id: str, tenant_id: str) -> None:
-    # 不在 tenant_session 内中途 commit：set_config(is_local) 是事务级，commit 会清掉
-    # 租户 GUC，后续查询撞 RLS current_setting 未设 → 事务中止。整条管线一个事务，
-    # 退出时提交（done）。失败则主事务回滚（批回到 queued/pending，cron 可重投，不卡
-    # running），再开一个新事务把 failed 落库。
+    # 1) 原子认领（独立事务提交）：pending/queued → running。失败=已被领走/已完成 → 跳过。
+    #    幂等点：cron 重投与 worker、并发 worker 都靠这个 CAS 去重（只一个能领到）。
+    async with tenant_session(tenant_id) as db:
+        claimed = await SourcingRepository(db).claim_for_processing(batch_id)
+    if not claimed:
+        log.info("batch %s 已认领或完成，跳过", batch_id)
+        return
+
+    # 2) 处理（独立事务）。不在事务内中途 commit：set_config(is_local) 是事务级，commit
+    #    会清租户 GUC，后续查询撞 RLS → 中止。成功退出时提交 done。
+    #    崩溃：批留 running（cron 按更长 running grace 回收，>妙手 fetch 耗时，不误回收在跑的）。
     try:
         async with tenant_session(tenant_id) as db:
             result = await _process(SourcingRepository(db), batch_id)
             await SourcingRepository(db).mark_post_done(batch_id, result)
-    except Exception as e:  # noqa: BLE001 —— 标 failed 留痕，重试策略见 T4
+    except Exception as e:  # noqa: BLE001 —— 标 failed 留痕
         log.warning("post_process 失败 batch=%s: %s", batch_id, e)
         async with tenant_session(tenant_id) as db:
             await SourcingRepository(db).mark_post_failed(batch_id, str(e))

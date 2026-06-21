@@ -197,6 +197,64 @@ async def test_post_process_list_tiktok_publishes(monkeypatch):
         assert job.result["publish"]["summary"]["published"] == 1
 
 
+async def test_post_process_idempotent_double_defer(monkeypatch):
+    """T4.2：同批 defer 两次（模拟 cron 重投撞 worker）→ CAS 认领只让一个跑，fetch 一次。"""
+    import app.domains.sourcing.tasks as t
+
+    calls = {"fetch": 0}
+
+    class FakeMS:
+        def url_fetch(self, urls, limit=None):
+            calls["fetch"] += 1
+            return [{"id": "1", "title": "x", "images": [], "price_cny": 1, "source_url": urls[0]}]
+
+        def delete(self, ids):
+            return {"deleted": 0}
+
+    async def fake_llm(system, user):
+        return [{"i": 0, "score": 90}]
+
+    ms = FakeMS()
+    monkeypatch.setattr(t, "_make_miaoshou", lambda: ms)
+    monkeypatch.setattr(t, "_llm_json", fake_llm)
+
+    tenant = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    await _seed_batch(tenant, batch_id, {"threshold": 70})
+    async with queue_app.open_async():
+        from app.domains.sourcing.tasks import post_process
+
+        await post_process.defer_async(batch_id=batch_id, tenant_id=tenant)
+        await post_process.defer_async(batch_id=batch_id, tenant_id=tenant)
+        await queue_app.run_worker_async(wait=False, install_signal_handlers=False)
+
+    assert calls["fetch"] == 1  # 第二个 job 认领失败被跳过
+    async with tenant_session(tenant) as db:
+        assert (await SourcingRepository(db).get_job(batch_id)).post_status == "done"
+
+
+async def test_post_process_skips_already_done(monkeypatch):
+    """T4.2：已 done 的批不重跑（fetch 不被调用）。"""
+    import app.domains.sourcing.tasks as t
+
+    class BoomMS:
+        def url_fetch(self, urls, limit=None):
+            raise AssertionError("已 done 不该再 fetch")
+
+    monkeypatch.setattr(t, "_make_miaoshou", lambda: BoomMS())
+
+    tenant = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    await _seed_batch(tenant, batch_id, {"threshold": 70})
+    async with tenant_session(tenant) as db:
+        await SourcingRepository(db).set_post_status(batch_id, "done")
+
+    await _run_worker(tenant, batch_id)
+
+    async with tenant_session(tenant) as db:
+        assert (await SourcingRepository(db).get_job(batch_id)).post_status == "done"
+
+
 async def test_post_process_miaoshou_failure_marks_failed(monkeypatch):
     import app.domains.sourcing.tasks as t
 

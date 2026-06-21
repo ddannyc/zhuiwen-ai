@@ -22,29 +22,39 @@ log = logging.getLogger(__name__)
 _settings = get_settings()
 
 
-async def find_stale_pending(grace_seconds: int) -> list[tuple[str, str]]:
-    """admin 连接跨租户读掉队批 (id, tenant_id)。每次开/弃引擎避免跨事件循环复用。"""
+async def find_stale_pending(grace_seconds: int, running_grace_seconds: int) -> list[tuple[str, str]]:
+    """admin 连接跨租户读掉队批 (id, tenant_id)：
+      - pending/queued 超 grace（投递丢失/迟迟没被领）；
+      - running 超 running_grace（worker 崩在处理中——grace 须 > 妙手 fetch 耗时，不误回收在跑的）。
+    每次开/弃引擎避免跨事件循环复用。"""
     engine = create_async_engine(_settings.database_admin_url)
     try:
         async with engine.connect() as conn:
             res = await conn.execute(
                 text(
-                    "SELECT id, tenant_id FROM collect_jobs "
-                    "WHERE post_status IN ('pending','queued') "
-                    "AND updated_at < now() - make_interval(secs => :g)"
+                    "SELECT id, tenant_id FROM collect_jobs WHERE "
+                    "(post_status IN ('pending','queued') AND updated_at < now() - make_interval(secs => :g)) "
+                    "OR (post_status = 'running' AND updated_at < now() - make_interval(secs => :rg))"
                 ),
-                {"g": grace_seconds},
+                {"g": grace_seconds, "rg": running_grace_seconds},
             )
             return [(str(r[0]), str(r[1])) for r in res]
     finally:
         await engine.dispose()
 
 
-async def requeue_stale_pending(grace_seconds: int | None = None) -> int:
-    """找掉队批 → 逐个置 queued（刷新 updated_at）+ 重投 post_process。返回重投数。
-    调用方需已开 queue_app（worker 内已开；测试外层包 open_async）。"""
+async def requeue_stale_pending(
+    grace_seconds: int | None = None, running_grace_seconds: int | None = None
+) -> int:
+    """找掉队批（含崩在 running 的）→ 逐个置 queued（刷新 updated_at）+ 重投 post_process。
+    返回重投数。调用方需已开 queue_app（worker 内已开；测试外层包 open_async）。"""
     grace = grace_seconds if grace_seconds is not None else _settings.sourcing_requeue_grace_seconds
-    stale = await find_stale_pending(grace)
+    rg = (
+        running_grace_seconds
+        if running_grace_seconds is not None
+        else _settings.sourcing_running_grace_seconds
+    )
+    stale = await find_stale_pending(grace, rg)
     if not stale:
         return 0
 

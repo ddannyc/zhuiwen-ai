@@ -70,6 +70,47 @@ async def test_requeue_picks_stale_skips_fresh():
     assert await _post_status(tenant, fresh) == "pending"  # 未动
 
 
+async def test_requeue_reclaims_crashed_running():
+    """T4.2：崩在 running 超 running_grace 的批被回收（worker 崩溃恢复）。"""
+    from app.domains.sourcing.cron import requeue_stale_pending
+
+    tenant = str(uuid.uuid4())
+    crashed = str(uuid.uuid4())
+    await _seed(tenant, crashed, backdate=0)
+    async with tenant_session(tenant) as db:
+        await SourcingRepository(db).set_post_status(crashed, "running")
+        await db.execute(
+            text("UPDATE collect_jobs SET updated_at = now() - make_interval(secs => 1000) WHERE id = :i"),
+            {"i": crashed},
+        )
+
+    async with queue_app.open_async():
+        n = await requeue_stale_pending(grace_seconds=120, running_grace_seconds=900)
+
+    assert n >= 1
+    assert await _post_status(tenant, crashed) == "queued"  # 回收重投
+
+
+async def test_requeue_skips_fresh_running():
+    """正在跑的 running（updated_at 新）不被误回收（grace > 妙手 fetch 耗时）。"""
+    from app.domains.sourcing.cron import requeue_stale_pending
+
+    tenant = str(uuid.uuid4())
+    running = str(uuid.uuid4())
+    await _seed(tenant, running, backdate=200)  # 200s 前，仍在 running grace(900) 内
+    async with tenant_session(tenant) as db:
+        await SourcingRepository(db).set_post_status(running, "running")
+        await db.execute(
+            text("UPDATE collect_jobs SET updated_at = now() - make_interval(secs => 200) WHERE id = :i"),
+            {"i": running},
+        )
+
+    async with queue_app.open_async():
+        await requeue_stale_pending(grace_seconds=120, running_grace_seconds=900)
+
+    assert await _post_status(tenant, running) == "running"  # 没被误回收
+
+
 async def test_requeue_recovers_stuck_queued():
     """掉队的 queued（worker 丢了）也要被重投，防卡死。"""
     from app.domains.sourcing.cron import requeue_stale_pending
