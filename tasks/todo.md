@@ -50,8 +50,9 @@
       post_process 兼容 URL(妙手 fetch)/items(直接评分) 两种入口；_defer 提取为 service 复用
 
 ## Phase 7 — 测试硬化
-- [ ] T7.1 全套：扩展解析器/队列、task InMemory 管线+重试+幂等、ingest e2e+RLS、outbox
-- [ ] **✅ C7**：py + 扩展测试全绿
+- [x] T7.1 补真实缺口：评分异常 LLM(非数组/部分)、loose_json 鲁棒性、publish 失败分支
+      (prefill_fail/info_fail/publish_fail/claim_fail)。扩展测试 N/A（Phase6 砍）
+- [x] **✅ C7**：py 全绿（95 测试）；关键路径 + 失败分支均有覆盖
 
 ---
 

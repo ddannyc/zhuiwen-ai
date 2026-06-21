@@ -56,3 +56,42 @@ async def test_score_candidates_empty():
 
     res = await score_candidates([], threshold=70, top_n=0, llm_json=fake_llm)
     assert res == {"count": 0, "passed": 0, "scores": []}
+
+
+async def test_score_candidates_handles_non_list_llm():
+    """模型返回非数组（异常）→ 不崩，全部 score 0、不达标。"""
+    async def bad_llm(system, user):
+        return {"oops": 1}
+
+    res = await score_candidates(
+        [{"id": "1", "title": "x", "price_cny": 1, "source_url": "u"}],
+        threshold=70, top_n=0, llm_json=bad_llm,
+    )
+    assert res["scores"][0]["score"] == 0.0
+    assert res["scores"][0]["pass"] is False
+
+
+async def test_score_candidates_partial_scores_default_zero():
+    """模型只评了部分候选 → 缺的按 0 分处理。"""
+    cands = [
+        {"id": "1", "title": "a", "price_cny": 1, "source_url": "u"},
+        {"id": "2", "title": "b", "price_cny": 1, "source_url": "u"},
+    ]
+
+    async def partial(system, user):
+        return [{"i": 0, "score": 90}]  # 只评了第 0 个
+
+    res = await score_candidates(cands, threshold=70, top_n=0, llm_json=partial)
+    s2 = next(s for s in res["scores"] if s["id"] == "2")
+    assert s2["score"] == 0.0 and s2["pass"] is False
+
+
+def test_loose_json_array_variants():
+    from app.domains.sourcing.ingest import loose_json_array
+
+    assert loose_json_array('[{"i": 0}]') == [{"i": 0}]
+    assert loose_json_array('```json\n[{"i": 1}]\n```') == [{"i": 1}]
+    assert loose_json_array("结果如下：[{\"i\": 2}] 完") == [{"i": 2}]
+    assert loose_json_array("") == []
+    assert loose_json_array("not json") == []
+    assert loose_json_array('{"i": 0}') == []  # 对象不是数组

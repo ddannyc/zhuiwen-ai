@@ -65,6 +65,58 @@ async def test_publish_empty_ids_errors():
     assert res["ok"] is False
 
 
+async def test_publish_prefill_fail_on_save_error():
+    """预填保存失败 → 该条 prefill_fail，不计入 prepared。"""
+    class MS(FakeMS):
+        def tkcall(self, endpoint, body):
+            if endpoint == "save_shop_collect_item_info":
+                return {"ok": False, "error": "必填缺失"}
+            return super().tkcall(endpoint, body)
+
+    res = await publish_to_tiktok(MS(), ["1"], auto=False)
+    assert res["results"][0]["status"] == "prefill_fail"
+    assert res["summary"]["prepared"] == 0
+    assert res["summary"]["failed"] == 1
+
+
+async def test_publish_info_read_fail():
+    """读取上架信息失败 → 该条 fail。"""
+    class MS(FakeMS):
+        def tkcall(self, endpoint, body):
+            if endpoint == "get_shop_collect_item_info":
+                return {"ok": False, "error": "读取失败"}
+            return super().tkcall(endpoint, body)
+
+    res = await publish_to_tiktok(MS(), ["1"])
+    assert res["results"][0]["status"] == "fail"
+
+
+async def test_publish_auto_publish_fail():
+    """auto 发布调用失败 → prepared 的转 publish_fail。"""
+    class MS(FakeMS):
+        def tkcall(self, endpoint, body):
+            if endpoint == "save_move_collect_task":
+                return {"ok": False, "error": "发布失败"}
+            return super().tkcall(endpoint, body)
+
+    res = await publish_to_tiktok(MS(), ["1"], auto=True)
+    assert res["results"][0]["status"] == "publish_fail"
+    assert res["summary"]["published"] == 0
+
+
+async def test_publish_claim_platform_fail_aborts():
+    """认领平台采集箱失败 → 整批中止报错。"""
+    class MS(FakeMS):
+        def tkcall(self, endpoint, body):
+            if endpoint == CLAIMED_PATH:
+                return {"ok": False, "error": "认领失败"}
+            return super().tkcall(endpoint, body)
+
+    res = await publish_to_tiktok(MS(), ["1"])
+    assert res["ok"] is False
+    assert "认领" in res["error"]
+
+
 def test_fill_required_fills_defaults():
     sci: dict = {}
     fill_required(sci, {})
