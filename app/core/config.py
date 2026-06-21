@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://localhost:4000"
     litellm_master_key: str = "change-me"
 
+    # --- Temporal (sourcing 采集长流程) ---
+    temporal_host: str = "localhost:7233"
+    sourcing_task_queue: str = "sourcing"
+    # Temporal 不可达时 sourcing 走降级：直接写 pending job 行，chat 路径不阻塞、
+    # 采集插件仍可经 /sourcing/jobs/poll 取任务。生产应保证 Temporal 可用以获得
+    # durable/重试/断点恢复。连接探活超时（秒），避免 chat 请求被长时间阻塞。
+    temporal_connect_timeout: float = 3.0
+
     # --- 规则知识库 (rules_kb) ---
     # 本期最小实现读这个 jsonl 种子语料；后续换 Postgres+pgvector 时弃用。
     rules_kb_path: str = "data/rules_kb/ozon_rules.jsonl"

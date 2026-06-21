@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.domains.auth.router import router as auth_router
 from app.domains.chat.router import router as chat_router
 from app.domains.knowledge_base.router import router as kb_router
+from app.domains.sourcing.router import router as sourcing_router
 from app.shared.tenant.middleware import TenantMiddleware
 
 # 其他域的 router（占位，按需取消注释）：
@@ -40,6 +41,7 @@ async def health():
 app.include_router(auth_router)
 app.include_router(kb_router)
 app.include_router(chat_router)
+app.include_router(sourcing_router)
 # app.include_router(listing_router)
 # app.include_router(publishing_router)
 # app.include_router(cs_router)
