@@ -111,6 +111,29 @@ async def test_requeue_skips_fresh_running():
     assert await _post_status(tenant, running) == "running"  # 没被误回收
 
 
+async def test_requeue_does_not_clobber_freshly_claimed_running(monkeypatch):
+    """竞态防护（review #1）：find 选中某 stale 批后，worker 恰好认领它（running, fresh
+    updated_at）。requeue 必须原子条件重置——不得把刚被认领的 running 打回 queued
+    （否则会触发同批双跑、双上架）。"""
+    from app.domains.sourcing import cron
+
+    tenant = str(uuid.uuid4())
+    bid = str(uuid.uuid4())
+    await _seed(tenant, bid, backdate=0)
+    async with tenant_session(tenant) as db:
+        await SourcingRepository(db).set_post_status(bid, "running")  # 刚被认领，updated_at 新
+
+    # 模拟 TOCTOU 窗口：find 在它还是 queued 时返回了它，但此刻已 running。
+    async def fake_find(grace, running_grace):
+        return [(bid, tenant)]
+
+    monkeypatch.setattr(cron, "find_stale_pending", fake_find)
+    async with queue_app.open_async():
+        await cron.requeue_stale_pending(grace_seconds=120, running_grace_seconds=900)
+
+    assert await _post_status(tenant, bid) == "running"  # 未被打回 queued
+
+
 async def test_requeue_recovers_stuck_queued():
     """掉队的 queued（worker 丢了）也要被重投，防卡死。"""
     from app.domains.sourcing.cron import requeue_stale_pending

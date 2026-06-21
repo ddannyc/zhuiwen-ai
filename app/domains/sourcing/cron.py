@@ -14,7 +14,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
-from app.domains.sourcing.models import POST_QUEUED
 from app.domains.sourcing.repository import SourcingRepository
 from app.shared.queue import queue_app, tenant_session
 
@@ -60,9 +59,15 @@ async def requeue_stale_pending(
 
     from app.domains.sourcing.tasks import post_process
 
+    requeued = 0
     for batch_id, tenant_id in stale:
+        # 原子条件重置（闭合 find→reset 的 TOCTOU 竞态）：仅当批此刻仍掉队才重置+defer，
+        # 不会把 find 之后被 worker 认领的 running 打回 queued（review #1）。
         async with tenant_session(tenant_id) as db:
-            await SourcingRepository(db).set_post_status(batch_id, POST_QUEUED)
-        await post_process.defer_async(batch_id=batch_id, tenant_id=tenant_id)
-    log.info("cron 重投掉队批 %d 个", len(stale))
-    return len(stale)
+            ok = await SourcingRepository(db).requeue_if_stale(batch_id, rg)
+        if ok:
+            await post_process.defer_async(batch_id=batch_id, tenant_id=tenant_id)
+            requeued += 1
+    if requeued:
+        log.info("cron 重投掉队批 %d 个", requeued)
+    return requeued
