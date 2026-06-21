@@ -59,6 +59,7 @@ def captured(monkeypatch):
     responses: list[dict] = []         # 路由决策序列（_tool_call/_answer_call）；耗尽则默认 answer
     choices: list = []                 # 每次路由的 tool_choice（验合规召回闸强制）
     chat_answers: list[str] = []       # 终答 chat 生成的文本队列（耗尽给默认）
+    gen_calls: list[list[dict]] = []   # 终答生成（chat/chat_stream）收到的 messages（验工具结果回灌）
 
     async def fake_cwt(messages, tools, model="x", tool_choice=None, **kw):
         calls.append([dict(m) for m in messages])
@@ -70,9 +71,11 @@ def captured(monkeypatch):
         sys = messages[0].get("content", "") if messages else ""
         if sys == _TITLE_SYS:           # 标题生成
             return "测试标题"
+        gen_calls.append([dict(m) for m in messages])
         return chat_answers.pop(0) if chat_answers else "（生成的终答）"  # 终答生成（非流式/降级）
 
     async def fake_chat_stream(messages, model="x", **kw):  # 终答真流式
+        gen_calls.append([dict(m) for m in messages])
         text = chat_answers.pop(0) if chat_answers else "（生成的终答）"
         for i in range(0, len(text), 8):  # 切小块模拟逐 token 到达
             yield text[i:i + 8]
@@ -82,7 +85,7 @@ def captured(monkeypatch):
     monkeypatch.setattr(service_mod, "chat_stream", fake_chat_stream)
     monkeypatch.setattr(service_mod, "ChatRepository", FakeRepo)
     return types.SimpleNamespace(calls=calls, responses=responses, choices=choices,
-                                 chat_answers=chat_answers)
+                                 chat_answers=chat_answers, gen_calls=gen_calls)
 
 
 def _service():
@@ -99,8 +102,8 @@ async def test_converse_rules_search_structured_action(captured):
     assert out["action"]["empty"] is False
     cites = out["action"]["cites"]
     assert cites and cites[0]["source_url"].startswith("https://") and cites[0]["version"]
-    # 工具结果真回灌给第 2 轮 LLM
-    tool_msgs = [m for m in captured.calls[1] if m.get("role") == "tool"]
+    # 工具结果真回灌给终答生成（gen_messages）
+    tool_msgs = [m for m in captured.gen_calls[0] if m.get("role") == "tool"]
     assert "来源" in tool_msgs[0]["content"]
 
 
@@ -295,6 +298,23 @@ async def test_converse_stream_clean_no_replace(captured):
     captured.chat_answers.append("美国宠物用品蓝海明显，建议聚焦智能喂食器。")
     events = [ev async for ev in _service().converse_stream("conv-1", "选品建议")]
     assert not any(e["event"] == "replace" for e in events)
+
+
+async def test_converse_stream_double_failure_emits_error(captured, monkeypatch):
+    """review #4：流式 + 非流式降级都挂 → 发 error 事件，仍正常 payload+done，不留半截。"""
+    async def boom_stream(messages, model="x", **kw):
+        raise RuntimeError("stream down")
+        yield  # pragma: no cover
+
+    async def boom_chat(messages, model="x", **kw):
+        raise RuntimeError("chat down")
+
+    monkeypatch.setattr(service_mod, "chat_stream", boom_stream)
+    monkeypatch.setattr(service_mod, "chat", boom_chat)
+    events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
+    names = [e["event"] for e in events]
+    assert "error" in names
+    assert "payload" in names and names[-1] == "done"
 
 
 async def test_converse_stream_token_reassembles_reply(captured):

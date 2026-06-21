@@ -56,7 +56,19 @@ def mock_llm(monkeypatch):
                              "arguments": json.dumps({"query": user, "platform": "ozon"})}}]}
         return {"role": "assistant", "content": "普通回答。", "tool_calls": []}
 
+    # 终答生成（chat_stream / chat）也 mock —— 否则 converse_stream 综述会真打 DashScope
+    # （review #2：e2e 不应依赖真 key / 真网络）。
+    import app.domains.chat.service as chat_service_mod
+
+    async def fake_chat(messages, model="x", **kw):
+        return "依据知识库给出回答。"
+
+    async def fake_chat_stream(messages, model="x", **kw):
+        yield "依据知识库给出回答。"
+
     monkeypatch.setattr(agent_mod, "chat_with_tools", fake_cwt)
+    monkeypatch.setattr(chat_service_mod, "chat", fake_chat)
+    monkeypatch.setattr(chat_service_mod, "chat_stream", fake_chat_stream)
 
 
 def _client():

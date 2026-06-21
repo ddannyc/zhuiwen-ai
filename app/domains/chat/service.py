@@ -166,10 +166,15 @@ class ChatService:
                     reply = guard.text  # 正常流完，无命中
             except Exception as e:  # noqa: BLE001 —— 流式出错降级：非流式一次拿全 + 整段发
                 log.warning("chat_stream 失败，降级非流式: %s", e)
-                raw = await chat(prep["gen_messages"], model=self.model)
-                reply = guard_text(raw, action)
-                if reply:
-                    yield {"event": "token", "data": {"delta": reply}}
+                try:
+                    raw = await chat(prep["gen_messages"], model=self.model)
+                    reply = guard_text(raw, action)
+                    if reply:
+                        yield {"event": "token", "data": {"delta": reply}}
+                except Exception as e2:  # noqa: BLE001 —— 流式+非流式都挂：发 error，不留半截无终止
+                    log.error("终答生成彻底失败（流式+非流式均挂）: %s", e2)
+                    reply = "抱歉，生成失败，请稍后重试。"
+                    yield {"event": "error", "data": {"msg": "生成失败，请稍后重试"}}
         else:
             # 空检索/静态：守卫文案由前端卡片渲，不流 token（避免与卡片文案重叠）。
             reply = prep["static_reply"] or ""
