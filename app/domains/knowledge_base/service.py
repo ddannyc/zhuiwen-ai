@@ -17,6 +17,9 @@ class KnowledgeBaseService:
         self.repo = KnowledgeBaseRepository(session)
 
     async def ingest(self, title: str, source_uri: str, text: str) -> None:
+        # ⚠ embed_text 现默认 DashScope text-embedding-v3（原 bge-m3 已弃）。kb_chunks
+        # 入库与检索必须同一模型——不同模型向量空间不可比，混入同表会让 cosine 相似度失真。
+        # 本域当前未启用、kb_chunks 为空；启用前若已有旧 bge-m3 向量须全量重灌。
         doc = await self.repo.add_document(title, source_uri)
         pieces = _split(text)
         embeddings = await embed_text(pieces)
