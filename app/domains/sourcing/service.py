@@ -16,7 +16,7 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.domains.sourcing.models import COLLECTED, CollectJob
+from app.domains.sourcing.models import COLLECTED, POST_PENDING, POST_QUEUED, CollectJob
 from app.domains.sourcing.repository import SourcingRepository
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,35 @@ _settings = get_settings()
 class SourcingService:
     def __init__(self, session: AsyncSession):
         self.repo = SourcingRepository(session)
+
+    async def ingest(self, *, tenant_id: str | None, market: str, urls: list[str],
+                     options: dict) -> dict:
+        """扩展回传 URL 批 → 存库（post_status=pending）→ defer 后处理（置 queued）。
+
+        ADR-001：procrastinate 无法与 asyncpg 业务写同事务原子 defer，故先提交 pending，
+        提交后再 defer；defer 失败/崩溃留 pending，由 cron 兜底重投（零丢失）。
+        """
+        batch_id = str(uuid.uuid4())
+        await self.repo.create_batch(
+            batch_id=batch_id, urls=urls, options=options, market=market,
+        )
+        await self.repo.session.commit()  # 先持久化 pending（defer 前提交）
+
+        post_status = POST_PENDING
+        try:
+            # 延迟导入避免循环（tasks 依赖 queue_app）。每次开/关连接池避免跨事件循环复用。
+            from app.domains.sourcing.tasks import post_process
+            from app.shared.queue import queue_app
+
+            async with queue_app.open_async():
+                await post_process.defer_async(batch_id=batch_id, tenant_id=str(tenant_id))
+            await self.repo.set_post_status(batch_id, POST_QUEUED)
+            await self.repo.session.commit()
+            post_status = POST_QUEUED
+        except Exception as e:  # noqa: BLE001 —— defer 失败不丢数据，cron 兜底
+            log.warning("defer post_process 失败，批 %s 留 pending 待 cron 兜底: %s", batch_id, e)
+
+        return {"batch_id": batch_id, "accepted": len(urls), "post_status": post_status}
 
     async def start_collect(self, *, tenant_id: str | None, keywords: list[str],
                             per_kw: int = 10, market: str | None = None) -> dict:

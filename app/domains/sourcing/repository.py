@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domains.sourcing.models import COLLECTING, PENDING, CollectJob
+from app.domains.sourcing.models import (
+    COLLECTING,
+    PENDING,
+    POST_PENDING,
+    CollectJob,
+)
 
 
 def _now() -> datetime:
@@ -40,6 +45,30 @@ class SourcingRepository:
             status=PENDING,
         )
         self.session.add(job)
+        await self.session.flush()
+        return job
+
+    async def create_batch(self, *, batch_id: str, urls: list[str], options: dict,
+                           market: str, source: str = "1688") -> CollectJob:
+        """扩展回传批：存 URL + options 到 result，post_status=pending（待入队/兜底重投）。
+        不传 tenant_id —— DEFAULT current_setting('app.current_tenant') 填充（RLS）。"""
+        job = CollectJob(
+            id=uuid.UUID(str(batch_id)),
+            market=market,
+            source=source,
+            result={"urls": urls, "options": options},
+            post_status=POST_PENDING,
+        )
+        self.session.add(job)
+        await self.session.flush()
+        return job
+
+    async def set_post_status(self, batch_id: str, post_status: str) -> CollectJob | None:
+        job = await self.get_job(batch_id)
+        if job is None:
+            return None
+        job.post_status = post_status
+        job.updated_at = _now()
         await self.session.flush()
         return job
 

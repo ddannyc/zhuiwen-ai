@@ -12,10 +12,26 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.domains.sourcing.schemas import JobDoneRequest, StartCollectRequest
+from app.domains.sourcing.schemas import (
+    IngestRequest,
+    JobDoneRequest,
+    StartCollectRequest,
+)
 from app.domains.sourcing.service import SourcingService
 
 router = APIRouter(prefix="/sourcing", tags=["sourcing"])
+
+
+@router.post("/ingest")
+async def ingest(body: IngestRequest, request: Request,
+                 db: AsyncSession = Depends(get_db)):
+    """扩展回传登录态采集的 1688 offer URL 批 → 存库 + 入队后处理。
+    tenant_id 显式贯穿到后处理 task（跨进程，不靠 ContextVar）。"""
+    tenant_id = getattr(request.state, "tenant_id", None)
+    return await SourcingService(db).ingest(
+        tenant_id=tenant_id, market=body.market, urls=body.urls,
+        options=body.options.model_dump(),
+    )
 
 
 @router.post("/collect")
