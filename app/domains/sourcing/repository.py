@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domains.sourcing.models import (
     COLLECTING,
     PENDING,
+    POST_DONE,
+    POST_FAILED,
     POST_PENDING,
     CollectJob,
 )
@@ -68,6 +70,27 @@ class SourcingRepository:
         if job is None:
             return None
         job.post_status = post_status
+        job.updated_at = _now()
+        await self.session.flush()
+        return job
+
+    async def mark_post_done(self, batch_id: str, result: dict) -> CollectJob | None:
+        job = await self.get_job(batch_id)
+        if job is None:
+            return None
+        job.post_status = POST_DONE
+        job.result = result
+        job.updated_at = _now()
+        await self.session.flush()
+        return job
+
+    async def mark_post_failed(self, batch_id: str, error: str) -> CollectJob | None:
+        job = await self.get_job(batch_id)
+        if job is None:
+            return None
+        job.post_status = POST_FAILED
+        job.attempts = (job.attempts or 0) + 1
+        job.last_error = (error or "")[:2000]
         job.updated_at = _now()
         await self.session.flush()
         return job

@@ -18,7 +18,7 @@
 - [x] T2.1 迁移 `0005`：collect_jobs 加 post_status/attempts/last_error/source；弃 poll 语义
 - [x] T2.2 `POST /sourcing/ingest`（收 urls）+ IngestRequest 校验 + 存批 + defer
       （删旧 /jobs/poll+/done 推迟到 Phase5：现 e2e/sourcing/workflow 测试仍依赖，T5.3 一并清）
-- [ ] T2.3 `tasks.post_process`：妙手 fetch + 评分 + 违禁词清洗 + top_n → result
+- [x] T2.3 `tasks.post_process`：妙手 fetch + 评分 + 违禁词清洗 + top_n → result
 - [ ] T2.4 `GET /sourcing/jobs/{batch_id}` 返 post_status/result/scores
 - [ ] **✅ C2**：真 URL curl→妙手fetch+评分→done；跨租户隔离 ← **第一个可演示里程碑**
 
