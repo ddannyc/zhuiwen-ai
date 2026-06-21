@@ -100,6 +100,23 @@ async def test_collect_done_bridges_to_post_process():
         assert gj["post_status"] in ("queued", "running", "done")
 
 
+async def test_done_sanitizes_non_1688_urls():
+    """review #6：/done 回传若带 urls，过滤到 1688 offer 后才存（防未校验链接进妙手 fetch）。"""
+    h = {"Authorization": f"Bearer {_token()}"}
+    async with _client() as c:
+        jid = (
+            await c.post("/sourcing/collect", headers=h, json={"keywords": ["杯子"]})
+        ).json()["job_id"]
+        await c.post("/sourcing/jobs/poll", headers=h)
+        await c.post(
+            f"/sourcing/jobs/{jid}/done",
+            headers=h,
+            json={"result": {"urls": ["https://taobao.com/x", "https://detail.1688.com/offer/9.html"]}},
+        )
+        gj = (await c.get(f"/sourcing/jobs/{jid}", headers=h)).json()
+    assert gj["result"]["urls"] == ["https://detail.1688.com/offer/9.html"]
+
+
 async def test_ingest_rejects_non_1688_url():
     h = {"Authorization": f"Bearer {_token()}"}
     async with _client() as c:

@@ -1,6 +1,6 @@
 """SourcingService 编排测试。
 
-不依赖真 DB：用内存假 repo 验 start_collect 落 pending 行（degraded）/ 无 DB（unavailable）+
+不依赖真 DB：用内存假 repo 验 start_collect 落 pending 行 / 无 DB（unavailable）+
 采集插件 poll/done 路径 + 跨租户 IDOR（done 前按 RLS 校验归属）。
 （Temporal 已移除；采集后处理走 /ingest→post_process，见 test_post_process.py。）
 """
@@ -51,54 +51,27 @@ class RaisingRepo(FakeRepo):
         raise RuntimeError("no db")
 
 
-def _svc(repo=None, connect=None):
+def _svc(repo=None):
     svc = SourcingService.__new__(SourcingService)
     svc.repo = repo if repo is not None else FakeRepo()
-    if connect is not None:
-        svc._connect = connect
     return svc
 
 
-async def _connect_fail():
-    raise ConnectionError("temporal down")
+# ---- start_collect ----
 
-
-class FakeHandle:
-    def __init__(self):
-        self.signaled = None
-
-    async def signal(self, name, arg):
-        self.signaled = (name, arg)
-
-
-class FakeClient:
-    def __init__(self):
-        self.started = None
-        self.handle = FakeHandle()
-
-    async def start_workflow(self, *a, **k):
-        self.started = (a, k)
-
-    def get_workflow_handle(self, wid):
-        self.last_wid = wid
-        return self.handle
-
-
-# ---- start_collect 三级降级 ----
-
-async def test_start_collect_degraded_writes_row():
+async def test_start_collect_writes_pending_row():
     repo = FakeRepo()
-    svc = _svc(repo=repo, connect=_connect_fail)
+    svc = _svc(repo=repo)
     res = await svc.start_collect(tenant_id="t1", keywords=["杯子"], per_kw=10, market=None)
 
-    assert res["mode"] == "degraded"
+    assert res["mode"] == "ok"
     job = repo.jobs[res["job_id"]]
-    assert job.status == PENDING  # 降级直接落 pending 行，插件可 poll
+    assert job.status == PENDING  # 落 pending 行，插件可 poll
     assert job.keywords == ["杯子"]
 
 
 async def test_start_collect_unavailable_still_returns_job_id():
-    svc = _svc(repo=RaisingRepo(), connect=_connect_fail)
+    svc = _svc(repo=RaisingRepo())
     res = await svc.start_collect(tenant_id=None, keywords=[], per_kw=10, market=None)
 
     assert res["mode"] == "unavailable"
@@ -110,7 +83,7 @@ async def test_start_collect_unavailable_still_returns_job_id():
 async def test_claim_next_serializes_and_marks_collecting():
     repo = FakeRepo()
     await repo.create_job(job_id="j1", keywords=["a"], per_kw=5, market=None)
-    svc = _svc(repo=repo, connect=_connect_fail)
+    svc = _svc(repo=repo)
 
     job = await svc.claim_next_job()
     assert job["id"] == "j1"
@@ -121,24 +94,17 @@ async def test_claim_next_serializes_and_marks_collecting():
     assert await svc.claim_next_job() is None
 
 
-async def test_complete_job_foreign_job_not_signaled(monkeypatch):
-    # 评审 blocker（跨租户 IDOR）：Temporal 按 job_id 全局直签、无 RLS。
-    # 必须先按 RLS 校验归属——查不到（跨租户不可见）的 job 绝不下发信号。
-    client = FakeClient()
-
-    async def connect_ok():
-        return client
-
-    repo = FakeRepo()  # 空：模拟 RLS 下 foreign job 不可见（get_job → None）
-    svc = _svc(repo=repo, connect=connect_ok)
+async def test_complete_job_foreign_job_404_not_found():
+    # 跨租户 IDOR：foreign job 在 RLS 下不可见（get_job → None）→ not_found，
+    # 绝不标 collected / 不触发后处理。
+    svc = _svc(repo=FakeRepo())  # 空 repo 模拟 RLS 隔离
     res = await svc.complete_job("foreign-jobid", {"items": [999]})
 
     assert res["ok"] is False
     assert res["mode"] == "not_found"
-    assert client.handle.signaled is None  # 关键：未向他人 workflow 注入信号
 
 
 async def test_complete_job_unknown_id_not_ok():
-    svc = _svc(connect=_connect_fail)  # 无此任务 → 归属校验即 not_found，不触 Temporal
+    svc = _svc()  # 无此任务 → 归属校验即 not_found
     res = await svc.complete_job("missing", {})
     assert res == {"ok": False, "mode": "not_found"}

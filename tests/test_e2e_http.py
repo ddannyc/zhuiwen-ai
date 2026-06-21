@@ -158,7 +158,7 @@ async def test_sourcing_lifecycle_and_rls():
         j = (await c.post("/sourcing/collect", headers=alice,
                           json={"keywords": ["杯子", "水壶"], "per_kw": 15, "market": "my"})).json()
         jid = j["job_id"]
-        assert j["mode"] == "degraded"
+        assert j["mode"] == "ok"
         assert (await c.get(f"/sourcing/jobs/{jid}", headers=alice)).json()["status"] == "pending"
 
         # 插件认领：claim_next 置 collecting 并序列化返回（func.now 回归点）

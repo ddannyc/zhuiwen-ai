@@ -10,7 +10,7 @@ import asyncio
 import logging
 
 import app.domains.sourcing.tasks  # noqa: F401 —— 注册 post_process + requeue periodic
-from app.shared.queue import queue_app
+from app.shared.queue import lifespan_open, queue_app
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 async def main() -> None:
     log.info("sourcing procrastinate worker 启动：queues=all")
-    async with queue_app.open_async():
+    # lifespan_open 开一次 queue_app（同时标记 app 已开，cron 内 defer 复用连接）。
+    async with lifespan_open():
         await queue_app.run_worker_async(install_signal_handlers=True)
 
 

@@ -44,13 +44,15 @@ class SourcingService:
         置 queued 用独立 tenant_session（重设租户 GUC），不复用请求会话——请求会话在
         commit 后 is_local 租户 GUC 已清，再查会撞 RLS。"""
         try:
-            # 延迟导入避免循环（tasks 依赖 queue_app）。每次开/关连接池避免跨事件循环复用。
+            # 延迟导入避免循环（tasks 依赖 queue_app）。
             from app.domains.sourcing.repository import SourcingRepository
             from app.domains.sourcing.tasks import post_process
-            from app.shared.queue import queue_app, tenant_session
+            from app.shared.queue import ensure_defer, tenant_session
 
-            async with queue_app.open_async():
-                await post_process.defer_async(batch_id=batch_id, tenant_id=str(tenant_id))
+            # ensure_defer：生产 lifespan 已开 app → 复用连接；测试/脚本 → 临时开（review #2）。
+            await ensure_defer(
+                lambda: post_process.defer_async(batch_id=batch_id, tenant_id=str(tenant_id))
+            )
             async with tenant_session(str(tenant_id)) as db2:
                 await SourcingRepository(db2).set_post_status(batch_id, POST_QUEUED)
             return POST_QUEUED
@@ -67,10 +69,10 @@ class SourcingService:
         base = {"job_id": job_id, "keywords": keywords, "per_kw": per_kw, "market": market}
         try:
             await self.repo.create_job(job_id=job_id, keywords=keywords, per_kw=per_kw, market=market)
-            return {**base, "mode": "degraded"}
+            return {**base, "mode": "ok"}  # pending 行已落库，插件可 poll
         except Exception as e:  # noqa: BLE001 —— 无 DB 时不让 chat 失败
             log.warning("采集任务写库失败（无可用 DB？）: %s", e)
-        return {**base, "mode": "unavailable"}
+        return {**base, "mode": "unavailable"}  # chat 据此提示未持久化（见 agent.t_collect_products）
 
     async def claim_next_job(self) -> dict | None:
         """采集插件 poll：认领下一个 pending 任务。RLS 限本租户。"""
@@ -85,16 +87,29 @@ class SourcingService:
         防跨租户用他人 job_id 注入伪造结果（IDOR）。"""
         if await self.repo.get_job(job_id) is None:
             return {"ok": False, "mode": "not_found"}
-        job = await self.repo.mark(job_id, COLLECTED, result=result)
+        job = await self.repo.mark(job_id, COLLECTED, result=_sanitize_done_result(result))
         if job is None:
             return {"ok": False, "mode": "not_found"}
         await self.repo.session.commit()  # 先持久化结果（defer 前提交）
         post_status = await self._defer_post_process(job_id, tenant_id)
-        return {"ok": True, "mode": "degraded", "post_status": post_status}
+        return {"ok": True, "mode": "ok", "post_status": post_status}
 
     async def get_job(self, job_id: str) -> dict | None:
         job = await self.repo.get_job(job_id)
         return _serialize(job) if job else None
+
+
+def _sanitize_done_result(result: dict) -> dict:
+    """插件 /done 回传若带 urls，过滤到 1688 offer 链接（与 /ingest 校验一致），
+    防未经校验的链接进 post_process→妙手 fetch（review #6）。items 直接放行（无外抓）。"""
+    if isinstance(result, dict) and isinstance(result.get("urls"), list):
+        clean: list[str] = []
+        for u in result["urls"]:
+            u = (u or "").strip() if isinstance(u, str) else ""
+            if "1688.com/offer/" in u and u not in clean:
+                clean.append(u)
+        return {**result, "urls": clean[:200]}
+    return result
 
 
 def _serialize(job: CollectJob) -> dict:

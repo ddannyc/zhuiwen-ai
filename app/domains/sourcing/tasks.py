@@ -3,10 +3,11 @@
 post_process：扩展回传的 URL 批 → 妙手 fetch → 评分（+违禁词清洗 + top_n）→ 存 result。
 worker 跨进程，tenant_id 必须显式传参（经 tenant_session 设 RLS）。
 
-依赖注入：_make_miaoshou / _llm_json 为模块级钩子，单测 monkeypatch 替身，
-生产用真实妙手 CLI + gateway。
+依赖注入：_make_miaoshou / _llm_json / _translate_title / _pick_good_images /
+_pick_category 为模块级钩子，单测 monkeypatch 替身，生产用真实妙手 CLI + gateway + studio。
 
-翻译/上架（T3.1/T3.2）后续接在评分之后；当前到「fetch+评分+存库」为 C2 MVP。
+完整管线：妙手 fetch（或插件回传 items）→ 评分+违禁词清洗+top_n → 翻译/质检（box edit）
+→ 可选 TikTok 上架 → mark_post_done。失败标 failed；幂等认领防并发双跑。
 """
 import logging
 

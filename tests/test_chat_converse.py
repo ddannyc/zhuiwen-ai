@@ -261,7 +261,7 @@ async def test_collect_products_passes_market_through(captured):
 
     async def fake_start_collect(*, tenant_id, keywords, per_kw, market):
         recorded.update(tenant_id=tenant_id, keywords=keywords, per_kw=per_kw, market=market)
-        return {"job_id": "job-xyz", "mode": "degraded"}
+        return {"job_id": "job-xyz", "mode": "ok"}
 
     captured.responses.append(_tool_call(
         "collect_products", {"keywords": ["杯子"], "perKw": 20, "market": "my"}))
