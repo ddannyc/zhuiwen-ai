@@ -173,10 +173,6 @@ async def prepare(
     return {"action": action or {"type": "answer"}, "tools_used": tools_used,
             "needs_gen": True, "gen_messages": msgs, "static_reply": None}
 
-    # 达最大轮：从现有 msgs（含工具结果）综述。
-    return {"action": action or {"type": "answer"}, "tools_used": tools_used,
-            "needs_gen": True, "gen_messages": msgs, "static_reply": None}
-
 
 def _make_tool_impls(box: BoxService, rules: RulesKbService, sourcing: SourcingService,
                      model: str) -> dict[str, Callable]:

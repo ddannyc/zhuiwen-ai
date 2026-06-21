@@ -38,6 +38,22 @@ def test_stream_guard_detects_leak_midstream():
     assert fb is not None and "抱歉" in fb
 
 
+def test_stream_guard_false_cite_split_across_deltas():
+    """假引用模式跨 delta 凑齐也要抓（最危险：编造官方引用）。"""
+    g = StreamGuard({"type": "answer"})
+    assert g.feed("根据") is None
+    assert g.feed("官方") is None
+    fb = g.feed("规则库，折扣不低于85%")  # 凑出"官方规则库" → 命中
+    assert fb is not None and "未能从平台规则库取证" in fb
+
+
+def test_stream_guard_window_catches_pattern_after_long_clean_prefix():
+    """长干净前缀后再出现模式：尾窗扫描仍抓得到（perf 优化不漏判）。"""
+    g = StreamGuard({"type": "answer"})
+    assert g.feed("正常内容" * 50) is None        # 长干净前缀
+    assert g.feed("请调用 rules_search 工具") is not None  # 尾部出现 → 命中
+
+
 def test_stream_guard_false_cite_only_when_not_rules():
     # 非检索路径命中假引用
     g = StreamGuard({"type": "answer"})

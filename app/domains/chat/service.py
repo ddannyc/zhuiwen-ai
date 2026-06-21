@@ -25,10 +25,13 @@ from app.domains.chat.prompts import (
     _VISION_DEFAULT,
 )
 from app.domains.chat.repository import ChatRepository
-from app.domains.chat.stream_guard import StreamGuard, guard_text
+from app.domains.chat.stream_guard import GUARD_TAIL, StreamGuard, guard_text
 from app.shared.llm.gateway import chat, chat_stream
 
 log = logging.getLogger(__name__)
+
+# 终答生成的输出上限：防超长回复放大 CPU/内存（守卫每 delta 扫描）+ 失控消耗（DoS）。
+_ANSWER_MAX_TOKENS = 1500
 
 
 def _iso(dt) -> str:
@@ -153,27 +156,42 @@ class ChatService:
         if prep["needs_gen"]:
             guard = StreamGuard(action)
             reply = ""
+            emitted = 0  # 已发到前端的"安全前缀"长度（留 GUARD_TAIL 尾巴不发，H1）
             try:
-                async for delta in chat_stream(prep["gen_messages"], model=self.model):
+                async for delta in chat_stream(
+                    prep["gen_messages"], model=self.model, max_tokens=_ANSWER_MAX_TOKENS
+                ):
                     fallback = guard.feed(delta)  # 流式增量守卫：全程在线
                     if fallback is not None:
-                        # 命中守卫（泄露/假引用）→ 停流，发 replace 让前端换 fallback。
+                        # 命中守卫（泄露/假引用）→ 停流，发 replace 覆盖（含已发的安全前缀）。
                         reply = fallback
                         yield {"event": "replace", "data": {"text": fallback}}
                         break
-                    yield {"event": "token", "data": {"delta": delta}}
+                    # 只发"已过匹配边界"的安全前缀，留最后 GUARD_TAIL 字符不发——不安全区在
+                    # 守卫看清前永不传输（H1：replace 只是事后遮 DOM，不能当唯一控制）。
+                    safe = max(0, len(guard.text) - GUARD_TAIL)
+                    if safe > emitted:
+                        yield {"event": "token", "data": {"delta": guard.text[emitted:safe]}}
+                        emitted = safe
                 else:
-                    reply = guard.text  # 正常流完，无命中
-            except Exception as e:  # noqa: BLE001 —— 流式出错降级：非流式一次拿全 + 整段发
+                    reply = guard.text  # 正常流完，无命中 → 发尾巴剩余
+                    if len(guard.text) > emitted:
+                        yield {"event": "token", "data": {"delta": guard.text[emitted:]}}
+            except Exception as e:  # noqa: BLE001 —— 流式出错降级：非流式一次拿全
                 log.warning("chat_stream 失败，降级非流式: %s", e)
                 try:
-                    raw = await chat(prep["gen_messages"], model=self.model)
+                    raw = await chat(prep["gen_messages"], model=self.model, max_tokens=_ANSWER_MAX_TOKENS)
                     reply = guard_text(raw, action)
-                    if reply:
+                    # 已发过部分前缀 → 用 replace 覆盖（前端 append，整段 token 会重复，Blocker#1）。
+                    if emitted > 0:
+                        yield {"event": "replace", "data": {"text": reply}}
+                    elif reply:
                         yield {"event": "token", "data": {"delta": reply}}
-                except Exception as e2:  # noqa: BLE001 —— 流式+非流式都挂：发 error，不留半截无终止
+                except Exception as e2:  # noqa: BLE001 —— 流式+非流式都挂：error，不留半截无终止
                     log.error("终答生成彻底失败（流式+非流式均挂）: %s", e2)
                     reply = "抱歉，生成失败，请稍后重试。"
+                    if emitted > 0:  # 已有前缀残留 → 覆盖掉
+                        yield {"event": "replace", "data": {"text": reply}}
                     yield {"event": "error", "data": {"msg": "生成失败，请稍后重试"}}
         else:
             # 空检索/静态：守卫文案由前端卡片渲，不流 token（避免与卡片文案重叠）。

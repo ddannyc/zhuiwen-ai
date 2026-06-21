@@ -251,12 +251,13 @@ async def test_converse_stream_event_order(captured):
 
 
 async def test_converse_stream_real_tokens_from_chat_stream(captured):
-    """T2：token 来自 chat_stream 逐 delta（真流式），非旧的定长 _chunk。"""
-    captured.chat_answers.append("一" * 20)  # fake_chat_stream 切 8 字/块 → 3 段
+    """T2：token 来自 chat_stream（真流式增量），且滑动尾巴下长回复分多段发出、可拼回原文。"""
+    full = "一" * 200  # 远超 GUARD_TAIL(48) → 安全前缀分多段发，留尾巴不发
+    captured.chat_answers.append(full)
     events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
     tokens = [e["data"]["delta"] for e in events if e["event"] == "token"]
-    assert len(tokens) == 3              # 3 个真 delta
-    assert "".join(tokens) == "一" * 20
+    assert len(tokens) > 1               # 增量多段（非一次性整段）
+    assert "".join(tokens) == full       # 拼回无损（含末尾尾巴）
 
 
 async def test_converse_stream_fallback_on_stream_error(captured, monkeypatch):
@@ -315,6 +316,81 @@ async def test_converse_stream_double_failure_emits_error(captured, monkeypatch)
     names = [e["event"] for e in events]
     assert "error" in names
     assert "payload" in names and names[-1] == "done"
+
+
+async def test_converse_stream_clean_persists_full_streamed_text(captured):
+    """干净流式：落库 == 完整流式文本（guard.text）。防静默丢库（test-engineer #2）。"""
+    full = "美国宠物用品蓝海明显，建议聚焦智能喂食器，毛利空间可观。" * 3
+    captured.chat_answers.append(full)
+    svc = _service()
+    _ = [ev async for ev in svc.converse_stream("conv-1", "选品建议")]
+    assistant = [m for m in svc.repo.messages if m.role == "assistant"][0]
+    assert assistant.content == full
+
+
+async def test_converse_stream_degrade_after_partial_uses_replace(captured, monkeypatch):
+    """Blocker#1：流式已吐部分 token 后才报错 → 降级用 replace 覆盖（非 token 追加，免重复）。"""
+    async def partial_then_boom(messages, model="x", **kw):
+        for d in ["一" * 60, "二" * 60]:  # 先吐够（过 GUARD_TAIL）让 emitted>0
+            yield d
+        raise RuntimeError("mid-stream drop")
+
+    monkeypatch.setattr(service_mod, "chat_stream", partial_then_boom)
+    captured.chat_answers.append("降级后的完整正文")  # chat() 降级返回
+    events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
+    assert any(e["event"] == "token" for e in events)      # 已发过部分
+    assert any(e["event"] == "replace" for e in events)    # 降级用 replace 覆盖
+    assert not any(e["event"] == "token" and "降级" in e["data"]["delta"] for e in events)  # 降级不走 token
+
+
+async def test_converse_stream_leak_never_emitted_as_token(captured, monkeypatch):
+    """H1：泄露内容在守卫看清前不传输——token 里绝不出现泄露片段，只有 replace。"""
+    async def leaky(messages, model="x", **kw):
+        # 干净前缀（过 GUARD_TAIL 才会发），随后凑出泄露
+        yield "安全前缀" * 20
+        yield "，接着我会调用 rules"
+        yield "_search 工具查询"
+
+    monkeypatch.setattr(service_mod, "chat_stream", leaky)
+    events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
+    tokens = "".join(e["data"]["delta"] for e in events if e["event"] == "token")
+    assert "rules_search" not in tokens and "rules" not in tokens  # 泄露片段从未作 token 发出
+    assert any(e["event"] == "replace" for e in events)
+
+
+async def test_prepare_multiple_tool_calls_one_round(captured):
+    """一轮内多 tool_call：全部执行、保序、action 取首个。"""
+    captured.responses.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "box_count", "arguments": "{}"}},
+        {"id": "c2", "type": "function", "function": {"name": "box_list", "arguments": "{}"}}]})
+    await _service().converse("conv-1", "采集箱多少个并列出")
+    # 一轮内两个 tool_call 都执行 → 两条工具结果回灌终答生成（保序）。
+    tool_msgs = [m for m in captured.gen_calls[0] if m.get("role") == "tool"]
+    assert [m["name"] for m in tool_msgs] == ["box_count", "box_list"]
+
+
+async def test_prepare_provider_ignores_required_returns_content(captured):
+    """provider 不认 tool_choice=required，返回纯 content 无 tool_calls → 优雅当直接答。"""
+    captured.responses.append({"role": "assistant", "content": "我直接回答", "tool_calls": None})
+    captured.chat_answers.append("终答")
+    out = await _service().converse("conv-1", "随便聊")
+    assert out["action"] == {"type": "answer"}
+    assert out["reply"] == "终答"
+
+
+async def test_prepare_rules_search_missing_query_falls_back(captured):
+    """rules_search 漏传 query → 回退用户消息检索，不假"未找到"。"""
+    captured.responses.append(_tool_call("rules_search", {"platform": "ozon"}))  # 无 query
+    out = await _service().converse("conv-1", "ozon 佣金费用规则")
+    assert out["action"]["type"] == "rules_search"  # 跑了检索（用 user_message）
+
+
+async def test_prepare_malformed_tool_args_no_crash(captured):
+    """工具参数非法 JSON → args={}，不崩。"""
+    captured.responses.append({"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "box_list", "arguments": "{not json"}}]})
+    out = await _service().converse("conv-1", "列出采集箱")
+    assert out["action"]["type"] == "box_list"
 
 
 async def test_converse_stream_token_reassembles_reply(captured):
