@@ -9,7 +9,7 @@
 - [ ] ⏸ **CHECKPOINT 1** — embedding 实测通 + 表可逆，人工确认
 
 ## 阶段 B — 灌库与检索
-- [ ] **T3** `scripts/load_rules_kb.py`：jsonl→embed→upsert(ON CONFLICT)，幂等，--platform 可选
+- [x] **T3** `scripts/load_rules_kb.py`：jsonl→embed→upsert(ON CONFLICT)，幂等 ✅ 灌入 524 条/6 平台，0 null（注：DashScope embedding 批上限 10）
 - [ ] **T4** `repository.py` search_filtered（向量+platform/site过滤 SQL）+ `service.py` 混合检索 RRF + jsonl 回退
 - [ ] ⏸ **CHECKPOINT 2** — 灌库成功 + DB 路径命中 + `test_rules_kb_search.py` 恒绿，人工确认
 
