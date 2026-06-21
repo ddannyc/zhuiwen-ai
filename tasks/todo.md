@@ -10,7 +10,8 @@
 - [x] T1.1 `app/shared/queue/` procrastinate App(PsycopgConnector) + `tenant_session`
 - [x] T1.2 迁移 `0004_procrastinate`：注入 procrastinate schema（alembic up/down）
 - [x] T1.3 trivial `ping` task：defer→worker→RLS 隔离验证
-- [ ] T1.A（并行）`sourcing/miaoshou.py`：url_fetch/edit/delete/tk_list_items/shops 封装
+- [x] T1.A（并行）`sourcing/miaoshou.py`：url_fetch/box/detail/edit/delete/shops/tkcall 封装
+      （tk_list_items 认领→上架编排留 T3.2，用这些原语拼）
 - [x] **✅ C1**：procrastinate worker 起；trivial task defer→执行→RLS 过；alembic up/down 净
 
 ## Phase 2 — ingest 垂直切片 ★MVP

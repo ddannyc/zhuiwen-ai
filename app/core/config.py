@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     # durable/重试/断点恢复。连接探活超时（秒），避免 chat 请求被长时间阻塞。
     temporal_connect_timeout: float = 3.0
 
+    # --- 妙手 Miaoshou (sourcing：1688 采集 / 采集箱 / TikTok 上架 SaaS) ---
+    # 经 select.py（开发）或编译二进制 zhuiwen-select（盒子）CLI 调用；
+    # 凭证由本进程注入子进程环境（MIAOSHOU_APP_KEY/SECRET）。见 sourcing/miaoshou.py。
+    miaoshou_select_bin: str = "~/bin/zhuiwen-select"
+    miaoshou_select_py: str = "~/.openclaw/skills/zhuiwen-product-selection/scripts/select.py"
+    miaoshou_app_key: str = ""
+    miaoshou_app_secret: str = ""
+
     # --- 规则知识库 (rules_kb) ---
     # 本期最小实现读 jsonl 种子语料；后续换 Postgres+pgvector 时弃用。
     # 指向目录时加载其下全部 *_rules.jsonl（多平台：ozon/amazon/tiktok/temu/
