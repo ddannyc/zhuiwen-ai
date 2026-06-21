@@ -4,8 +4,8 @@
 
 ## 阶段 A — 地基
 - [x] **T0** spike：DashScope text-embedding-v3 经 `litellm.aembedding` 实测返回 1024 维 ✅（须 `litellm.drop_params=True`，dimensions 被丢→取 v3 默认 1024）
-- [ ] **T1** 重写 `embeddings.py` embed_text 走 litellm SDK→DashScope；config +embedding_model/embedding_dim
-- [ ] **T2** migration `0004_rules_kb.py`（表+扩展+hnsw索引，无RLS）+ `models.py` RulesKbRow
+- [x] **T1** 重写 `embeddings.py` embed_text 走 litellm SDK→DashScope；config +embedding_model/embedding_dim ✅ commit 4a53821
+- [x] **T2** migration `0004_rules_kb.py`（表+扩展+hnsw索引，无RLS）+ `models.py` RulesKbRow ✅（本 worktree .env 指向独立库 xborder_rkb）
 - [ ] ⏸ **CHECKPOINT 1** — embedding 实测通 + 表可逆，人工确认
 
 ## 阶段 B — 灌库与检索
