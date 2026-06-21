@@ -111,6 +111,7 @@ class ChatState(TypedDict):
     reply: str
     rounds: int
     force_tool: Optional[str]            # 首轮强制调用的工具名（合规召回闸），无则模型自选
+    user_message: str                    # 用户原始消息，供工具参数缺失时回退（如空 query）
 
 
 def build_chat_agent(session: AsyncSession, model: str = "gpt-4o-mini"):
@@ -146,6 +147,9 @@ def build_chat_agent(session: AsyncSession, model: str = "gpt-4o-mini"):
                 args = json.loads(tc["function"].get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
+            # 强制调用（tool_choice）时模型常漏传 query → 回退用用户原始消息，避免空检索假"未找到"。
+            if name == "rules_search" and not (args.get("query") or "").strip():
+                args["query"] = state.get("user_message", "")
             impl = tool_impls.get(name)
             if impl:
                 text, payload = await impl(args)
@@ -227,8 +231,11 @@ def _make_tool_impls(box: BoxService, rules: RulesKbService, model: str) -> dict
         # 桩：真实现触发 sourcing 域 Temporal CollectWorkflow（计划 §3）。
         job_id = str(uuid.uuid4())
         kws = a.get("keywords") or []
-        text = (f"✅ 已下发采集任务（关键词 {kws or '待提炼'}，每词 {a.get('perKw', 10)} 个）。"
-                f"插件会按默认配置执行 采集→评分→翻译→上架。")
+        # 诚实桩：sourcing（Temporal 采集工作流）尚未实现。如实告知，禁止把它说成
+        # 「正在抓取/已完成」之类既成事实，避免模型据此编造进度。
+        text = (f"采集功能尚在接入中（sourcing 工作流未上线），暂无法真正执行抓取。"
+                f"已记录你的采集意向：关键词 {kws or '待提炼'}、每词 {a.get('perKw', 10)} 个。"
+                f"请如实告知用户该功能开发中，不要声称已在抓取或已完成。")
         return text, {"type": "collect_products", "job_id": job_id}
 
     return {

@@ -98,7 +98,8 @@ async def test_full_chat_flow_rules_search(mock_llm):
         assert r.status_code == 200
         events = _parse_sse(r.text)
         names = [e["event"] for e in events]
-        assert names[0] == "action" and names[-1] == "done"
+        # 两段式：首事件是占位 tool_running，随后 action…done
+        assert names[0] == "tool_running" and "action" in names and names[-1] == "done"
         payload = next(e["data"] for e in events if e["event"] == "payload")
         assert payload["type"] == "rules_search"
         # 真查了 jsonl 知识库，命中带溯源

@@ -194,13 +194,13 @@ async def test_converse_stream_event_order(captured):
     events = [ev async for ev in _service().converse_stream("conv-1", "Ozon 佣金")]
     names = [e["event"] for e in events]
 
-    # 顺序：action → tool_running* → token* → payload → done
-    assert names[0] == "action"
+    # 两段式顺序：tool_running(占位) → action → tool_running* → token* → payload → done
+    assert names[0] == "tool_running"  # 立即占位反馈（消除空白）
     assert names[-1] == "done"
     assert names[-2] == "payload"
-    assert "tool_running" in names and "token" in names
-    # tool_running 在 token 之前
-    assert names.index("tool_running") < names.index("token")
+    assert "action" in names and "token" in names
+    # 占位 tool_running 在 action 与 token 之前
+    assert names.index("tool_running") < names.index("action") < names.index("token")
     # payload 携带完整结构化 action
     payload = [e for e in events if e["event"] == "payload"][0]
     assert payload["data"]["type"] == "rules_search"

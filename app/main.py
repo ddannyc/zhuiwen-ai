@@ -6,6 +6,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.config import get_settings
 from app.domains.auth.router import router as auth_router
 from app.domains.chat.router import router as chat_router
 from app.domains.knowledge_base.router import router as kb_router
@@ -21,9 +22,11 @@ app = FastAPI(title="XBorder AI")
 # 否则 TenantMiddleware 会先拦截带 Authorization 的 OPTIONS 预检（无 token → 401）
 # 导致浏览器报 CORS 失败。故先 add Tenant、后 add CORS。
 app.add_middleware(TenantMiddleware)
+_settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[o.strip() for o in _settings.cors_origins.split(",") if o.strip()],
+    allow_origin_regex=_settings.cors_origin_regex or None,
     allow_methods=["*"],
     allow_headers=["*"],
 )

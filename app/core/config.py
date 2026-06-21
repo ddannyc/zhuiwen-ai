@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me"
     jwt_algorithm: str = "HS256"
 
+    # --- CORS ---
+    # 精确白名单（CSV）。生产设为真实前端域名。
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # 开发期私网放行正则：localhost / 127.0.0.1 / 私有网段（192.168.x.x、10.x.x.x、
+    # 172.16–31.x.x）的 vite 端口（5173 dev / 4173 preview）。换设备/IP 调试无需逐个手填。
+    # 生产应清空（CORS_ORIGIN_REGEX=），只用精确白名单。
+    cors_origin_regex: str = (
+        r"https?://(localhost|127\.0\.0\.1|"
+        r"(?:192\.168|10\.\d+|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d+){1,2}"
+        r"):(?:5173|4173)"
+    )
+
     # --- LLM 网关 ---
     # chat 走 LiteLLM SDK 进程内调用（gateway.py），默认打 DashScope 兼容端点。
     chat_model: str = "qwen-plus"

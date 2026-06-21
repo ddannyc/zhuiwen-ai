@@ -5,6 +5,7 @@
 
 产出对齐前端 web/src/lib/contract.ts：结构化 ChatAction + SSE 事件流。
 """
+import asyncio
 import re
 from typing import Any, AsyncIterator
 
@@ -113,7 +114,7 @@ class ChatService:
         agent = build_chat_agent(self.session, model=self.model)
         final = await agent.ainvoke({
             "messages": messages, "action": None, "tools_used": [], "reply": "", "rounds": 0,
-            "force_tool": force_tool,
+            "force_tool": force_tool, "user_message": user_message,
         })
 
         if is_first:
@@ -161,26 +162,32 @@ class ChatService:
     async def converse_stream(
         self, conversation_id: str, user_message: str
     ) -> AsyncIterator[dict[str, Any]]:
-        """SSE 事件流（对齐 contract.ts SseEvent）：
-        action → tool_running* → token* → payload → done。
-
-        注：本期 LLM 调用是非流式，token 事件由最终回复在服务端切块产生（真 SSE 传输，
-        逐 token LLM 流式留待 gateway 增 chat_stream 后接入）。
+        """SSE 事件流（对齐 contract.ts SseEvent），两段式：
+        1) 立即推占位（检索中/思考中），消除生成期空白等待；
+        2) 完整生成 + 全部防幻觉守卫（_run）；
+        3) 逐字打字推送已守卫的安全文本（块间延迟，可见打字）。
+        守卫全程生效：用户只会看到守卫后的最终文本，不会先看到未守卫内容。
         """
+        # 1) 立即占位反馈。合规问题确定会检索（召回闸），故直接显示"检索平台规则"。
+        compliance = bool(_COMPLIANCE_RE.search(user_message))
+        yield {"event": "tool_running",
+               "data": {"tool": "thinking",
+                        "label": "检索平台规则…" if compliance else "思考中…"}}
+
+        # 2) 完整生成 + 守卫（空检索/泄露/假引用 都在此应用到 reply）
         out = await self._run(conversation_id, user_message)
         action, reply, tools_used = out["action"], out["reply"], out["tools_used"]
 
-        # 1) 骨架：先告诉前端动作类型，挂占位
         yield {"event": "action", "data": {"type": action["type"]}}
-        # 2) 工具执行轨迹
         for t in tools_used:
             yield {"event": "tool_running", "data": {"tool": t, "label": TOOL_LABELS.get(t, t)}}
-        # 3) token：切块推送（中文按字、英文按词的折中：按空白切，无空白则整体）
-        for delta in _chunk(reply):
+
+        # 3) 逐字打字（已守卫文本，块间小延迟让前端可见地逐步渲染）
+        for delta in _chunk(reply, 10):
             yield {"event": "token", "data": {"delta": delta}}
-        # 4) 完整结构化 payload（带 rows/cites/job_id）
+            await asyncio.sleep(0.02)
+
         yield {"event": "payload", "data": action}
-        # 5) 落库 + done
         msg = await self.repo.add_message(conversation_id, "assistant", reply, action=action)
         yield {"event": "done", "data": {"message_id": str(msg.id)}}
 
