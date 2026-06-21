@@ -142,11 +142,30 @@ async def test_complete_job_temporal_signals_workflow():
     async def connect_ok():
         return client
 
-    svc = _svc(connect=connect_ok)
+    repo = FakeRepo()
+    await repo.create_job(job_id="j1", keywords=[], per_kw=10, market=None)  # 本租户拥有
+    svc = _svc(repo=repo, connect=connect_ok)
     res = await svc.complete_job("j1", {"items": [1, 2]})
 
     assert res == {"ok": True, "mode": "temporal"}
     assert client.handle.signaled == ("browser_done", {"items": [1, 2]})
+
+
+async def test_complete_job_foreign_job_not_signaled(monkeypatch):
+    # 评审 blocker（跨租户 IDOR）：Temporal 按 job_id 全局直签、无 RLS。
+    # 必须先按 RLS 校验归属——查不到（跨租户不可见）的 job 绝不下发信号。
+    client = FakeClient()
+
+    async def connect_ok():
+        return client
+
+    repo = FakeRepo()  # 空：模拟 RLS 下 foreign job 不可见（get_job → None）
+    svc = _svc(repo=repo, connect=connect_ok)
+    res = await svc.complete_job("foreign-jobid", {"items": [999]})
+
+    assert res["ok"] is False
+    assert res["mode"] == "not_found"
+    assert client.handle.signaled is None  # 关键：未向他人 workflow 注入信号
 
 
 async def test_complete_job_degraded_marks_collected():
@@ -161,6 +180,6 @@ async def test_complete_job_degraded_marks_collected():
 
 
 async def test_complete_job_unknown_id_not_ok():
-    svc = _svc(connect=_connect_fail)  # 无此任务 → mark 返回 None
+    svc = _svc(connect=_connect_fail)  # 无此任务 → 归属校验即 not_found，不触 Temporal
     res = await svc.complete_job("missing", {})
-    assert res == {"ok": False, "mode": "degraded"}
+    assert res == {"ok": False, "mode": "not_found"}

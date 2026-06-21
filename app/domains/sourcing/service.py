@@ -62,7 +62,14 @@ class SourcingService:
 
     async def complete_job(self, job_id: str, result: dict) -> dict:
         """采集插件 /done 回结果：优先给 workflow 发信号续跑后处理；
-        Temporal 不可达则降级直接把任务标 collected。"""
+        Temporal 不可达则降级直接把任务标 collected。
+
+        安全：必须先按 RLS 校验归属再签发。Temporal workflow handle 按 job_id 在
+        全局命名空间查找、不受 RLS 约束——若不先校验，跨租户可拿他人 job_id 直接
+        signal，把伪造 result 注入他人采集管线（IDOR）。get_job 走 RLS：查不到
+        （他租户不可见 / 非法 id）即归属不符 → not_found，绝不下发信号。"""
+        if await self.repo.get_job(job_id) is None:
+            return {"ok": False, "mode": "not_found"}
         try:
             client = await self._connect()
             handle = client.get_workflow_handle(job_id)

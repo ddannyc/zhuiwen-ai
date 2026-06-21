@@ -181,6 +181,24 @@ async def test_sourcing_lifecycle_and_rls():
         assert (await c.get(f"/sourcing/jobs/{jid}", headers=other)).status_code == 404
 
 
+async def test_sourcing_done_foreign_job_404_no_mutation():
+    # 评审 blocker 回归（跨租户写路径）：租户B 不能对租户A 的 job /done。
+    # 既挡 Temporal 直签 IDOR，也证 RLS 写路径不漏。断言 A 的 job 未被改动。
+    alice = {"Authorization": f"Bearer {_token()}"}
+    bob = {"Authorization": f"Bearer {_token()}"}
+    async with _client() as c:
+        j = (await c.post("/sourcing/collect", headers=alice,
+                          json={"keywords": ["私有"], "per_kw": 5})).json()
+        jid = j["job_id"]
+        # B 拿到 A 的 job_id 回结果 → 404，且不得写入
+        r = await c.post(f"/sourcing/jobs/{jid}/done", headers=bob,
+                         json={"result": {"items": [{"evil": 1}]}})
+        assert r.status_code == 404
+        got = (await c.get(f"/sourcing/jobs/{jid}", headers=alice)).json()
+        assert got["status"] == "pending"      # 未被推进
+        assert got["result"] is None           # 未被注入伪造结果
+
+
 async def test_sourcing_malformed_job_id_returns_404():
     # 评审 #2：非法 uuid 路径参数应 404（资源不存在），不得 500（未捕异常）。
     h = {"Authorization": f"Bearer {_token()}"}
