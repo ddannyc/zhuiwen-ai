@@ -132,6 +132,11 @@ def _serialize(job: CollectJob) -> dict:
         "market": job.market,
         "result": job.result,
         "error": job.error,
+        # 后处理状态（客户端化）：前端轮询 ingest 批的处理进度。
+        "post_status": job.post_status,
+        "attempts": job.attempts,
+        "last_error": job.last_error,
+        "source": job.source,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }

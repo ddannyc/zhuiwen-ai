@@ -19,7 +19,8 @@ class FakeRepo:
     async def create_job(self, *, job_id, keywords, per_kw, market):
         job = types.SimpleNamespace(
             id=job_id, status=PENDING, keywords=keywords, per_kw=per_kw, market=market,
-            result=None, error=None, created_at=None, updated_at=None)
+            result=None, error=None, created_at=None, updated_at=None,
+            post_status="pending", attempts=0, last_error=None, source="1688")
         self.jobs[job_id] = job
         return job
 

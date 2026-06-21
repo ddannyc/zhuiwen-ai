@@ -19,8 +19,9 @@
 - [x] T2.2 `POST /sourcing/ingest`（收 urls）+ IngestRequest 校验 + 存批 + defer
       （删旧 /jobs/poll+/done 推迟到 Phase5：现 e2e/sourcing/workflow 测试仍依赖，T5.3 一并清）
 - [x] T2.3 `tasks.post_process`：妙手 fetch + 评分 + 违禁词清洗 + top_n → result
-- [ ] T2.4 `GET /sourcing/jobs/{batch_id}` 返 post_status/result/scores
-- [ ] **✅ C2**：真 URL curl→妙手fetch+评分→done；跨租户隔离 ← **第一个可演示里程碑**
+- [x] T2.4 `GET /sourcing/jobs/{batch_id}` 返 post_status/result/scores
+- [x] **✅ C2**：ingest→存→入队→worker妙手fetch+评分→done+scores；跨租户隔离（mock 妙手/LLM）
+      ← 第一个可演示里程碑（真实跑通待 T0 妙手实测 + 真 DASHSCOPE_API_KEY）
 
 ## Phase 3 — 后处理深化
 - [ ] T3.1 翻译 + 图片质检（studio + miaoshou.edit 回写，options 开关）

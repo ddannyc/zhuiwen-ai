@@ -66,6 +66,20 @@ async def test_ingest_stores_batch_and_queues():
         assert gj["result"]["urls"] == [_OFFER1, _OFFER2]
 
 
+async def test_ingest_get_returns_post_status_fields():
+    """T2.4：GET 状态返回 post_status/attempts/last_error/source（供前端轮询后处理进度）。"""
+    h = {"Authorization": f"Bearer {_token()}"}
+    async with _client() as c:
+        bid = (
+            await c.post("/sourcing/ingest", headers=h, json={"urls": [_OFFER1]})
+        ).json()["batch_id"]
+        gj = (await c.get(f"/sourcing/jobs/{bid}", headers=h)).json()
+    assert gj["post_status"] in ("queued", "pending")
+    assert gj["attempts"] == 0
+    assert gj["last_error"] is None
+    assert gj["source"] == "1688"
+
+
 async def test_ingest_rejects_non_1688_url():
     h = {"Authorization": f"Bearer {_token()}"}
     async with _client() as c:
