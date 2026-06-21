@@ -1,122 +1,95 @@
-# PLAN：rules_kb pgvector 混合检索升级
+# 实施计划：chat 真实流式输出
 
-> 依据 SPEC.md。垂直切片（每任务一条可验证的完整路径），非按层横切。
-> 每阶段末有 checkpoint，人工确认后再进下一阶段。
+> 源 `SPEC.md`。垂直切片 + 阶段检查点。待评审，批准后逐阶段执行。
+> （上一份 plan——rules_kb pgvector——已完成合入 main，存 git 历史。）
 
----
+## 0. 关键前提
+- 假流式 = `_run` 出完整 reply → `_chunk`+`sleep` 假打字。真流式 = LLM 边生成边吐 token。
+- 终答来自 agent `route` 节点的内容生成（直接答 or 工具结果回灌后第2轮）。
+- 守卫：空检索**事前定**（不流，已实现）；假引用/泄露**流式中增量拦截**（不事后覆盖）。
+- 方案 B（已倾向）：agent 拆出 `prepare()`（跑路由+工具，返回「是否需 LLM 生成 + 生成用 messages」），
+  service 对需生成的路径用 `chat_stream` 真流式。
 
-## 依赖图
-
+## 1. 依赖图
 ```
-T0 spike: DashScope embedding 经 litellm 实测  ──┐ (闸：不通则改方案)
-                                                 ▼
-T1 embed_text 重写 + config ─────────┐
-                                     ├──► T3 灌库脚本 ──┐
-T2 migration 0004 + models ──────────┘                 │
-        │                                              ▼
-        └──────────► T4 repository + service 混合检索 ◄─┘
-                              │
-                              ▼
-                     T5 测试（DB 集成 + 离线契约恒绿）
+P0 gateway.chat_stream ──┐
+                         ▼
+P1 agent.prepare() 拆分（路由/工具 与 终答生成解耦）
+                         ▼
+P2 converse_stream 真流式 + 降级（端到端真 token）★MVP
+                         ▼
+P3 流式守卫（增量拦截 + replace 事件）
+                         ▼
+P4 前端（真 token 渲染 + replace 处理）
+                         ▼
+P5 清理 + 测试硬化（删 _chunk）
 ```
+切片纪律：每阶段一条端到端可验路径，非按层堆。
 
-关键依赖：
-- **T0 是闸**：DashScope text-embedding-v3 经 `litellm.aembedding` + `dimensions=1024`
-  不通，则 T1 改方案（直 httpx 打 DashScope /embeddings 或换模型），先问用户。
-- T3 灌库需 T1（embed）+ T2（表）双就绪。
-- T4 service 混合需 T1（query embed）+ T4 repository（向量 SQL）；jsonl 回退路径不依赖 DB。
-- T5 离线契约测试只依赖 service 回退路径（T4 必须保住 session=None 行为）。
+## 2. 阶段与任务
 
----
+### Phase 0 — gateway 流式原语
+**T0.1 `gateway.chat_stream`**
+- 目标：`chat_stream(messages, model) -> AsyncIterator[str]`，litellm `acompletion(stream=True)`，逐 chunk 取 `choices[0].delta.content`（空块跳过）。
+- 验收：mock litellm 流 → 逐 delta 产出；拼接 == 完整文本。
+- 验证：`pytest tests/test_gateway_stream.py`。
+- **✅ C0**：chat_stream 单测过；gateway 仍是 LLM 唯一出口。
 
-## 阶段与切片
+### Phase 1 — agent 拆 prepare()
+**T1.1 `prepare()`：路由/工具 与 终答生成解耦**
+- 目标：新增 `agent.prepare(...) -> {action, needs_gen, gen_messages|static_reply, tools_used}`。跑 route + tool_exec，返回：
+  - 需 LLM 生成（answer / analyze / 非空 rules_search 综述）→ `needs_gen=True` + `gen_messages`（history+工具结果，供流式终答）。
+  - 模板/卡片（box_list / collect_products / 空 rules_search）→ `needs_gen=False` + `static_reply`。
+- `_run` 改为 `prepare()` +（非流式时）`chat()` 生成，保持现有 `converse` 行为不变。
+- 验收：各路径 prepare 返回正确 shape；现有 chat 测试（converse/事件/守卫/落库）全绿。
+- **✅ C1**：prepare 分流正确；既有非流式路径回归绿。
 
-### 阶段 A — 地基（T0–T2）
+### Phase 2 — converse_stream 真流式 + 降级 ★MVP
+**T2.1 真 token 流**
+- 目标：`converse_stream` → `prepare()` → `needs_gen` 时 `chat_stream(gen_messages)` 逐 delta `yield token`；
+  否则发 `static_reply`（卡片路径，不流）。空检索仍不流（回归）。删 `_chunk`+`sleep`。
+- 验收：mock chat_stream 产 N 段 → 恰 N 个 token 事件（非定长 `_chunk`）；事件序 tool_running→action→token*→payload→done。
+**T2.2 降级**
+- 目标：`chat_stream` 抛错 → 回退非流式 `chat()` 一次拿全 + 整段发（仍 token 事件 + done）。
+- 验收：mock chat_stream 抛错 → 仍出完整回复 + done，不挂。
+- **✅ C2**（端到端 MVP）：真实 API 问 Ozon 佣金 → token 随 LLM 节奏到达（curl 观察）；空检索无 token；流式出错降级出全文。
 
-**T0｜spike：DashScope embedding 连通性验证**
-- 一次性脚本（可丢弃 / 收进 scripts/）：`litellm.aembedding(model="openai/text-embedding-v3",
-  api_base=dashscope_base_url, api_key=dashscope_api_key, input=["测试"], dimensions=1024)`。
-- 验收：返回 1 个 1024 维 float 向量，无异常。
-- 验证：打印 `len(resp.data[0]["embedding"]) == 1024`。
-- 失败处置：记录错误，停下问用户（SPEC §8 风险 1）。**不绕过往下做。**
+### Phase 3 — 流式守卫
+**T3.1 `stream_guard.py` 增量守卫**
+- 目标：维护 running buffer，每 delta 后跑 `_LEAK_RE` /（非检索路径）`_VERIFY_CLAIM_RE`（复用现有常量，单一来源）。命中 → 停流。
+**T3.2 converse_stream 接守卫 + replace**
+- 目标：守卫命中 → 停 token、发 `replace` 事件（fallback：`_LEAK_FALLBACK`/`_FALSE_CITE_FALLBACK`）→ payload+done；落库为 fallback。正常路径无 replace。
+- 验收：mock 终答流出含泄露片段 → 中途停 + 发 replace(fallback) + 落库 fallback；干净文本无 replace。
+- **✅ C3**：泄露/假引用流式拦截过；用户/落库均守卫后文本。
 
-**T1｜embed_text 重写 + config**
-- 改 `app/shared/llm/embeddings.py`：`embed_text(texts, model=...)` 走 `litellm.aembedding`
-  → DashScope（同 gateway 模式：`openai/` 前缀 + api_base + api_key + dimensions）。
-- 改 `app/core/config.py`：+`embedding_model="text-embedding-v3"`、`embedding_dim=1024`；
-  rules_kb_path 注释更新（作回退源，不再标弃用）。
-- 验收：`await embed_text(["a","b"])` 返回 2×1024 向量；knowledge_base 既有调用签名不破。
-- 验证：`uv run python -c "import asyncio; from app.shared.llm.embeddings import embed_text; print(len(asyncio.run(embed_text(['x']))[0]))"` → 1024。
+### Phase 4 — 前端
+**T4.1 真 token + replace**
+- 目标：`ChatPane` token 累积（已有）；加 `replace` 事件（清空当前流式 content 换 fallback）；`contract.ts` + replace 事件类型。
+- 验收：浏览器真打字（token 逐字，非整段跳）；触发泄露 → 可见纠正为 fallback。
+- **✅ C4**：前端真流式手验 + replace 呈现。
 
-**T2｜migration 0004 + ORM models**
-- `migrations/versions/0004_rules_kb.py`（down_revision="0003_sourcing"）：
-  `CREATE EXTENSION IF NOT EXISTS vector`；`CREATE TABLE IF NOT EXISTS rules_kb(...)`
-  （SPEC §2 列；**无 tenant_id、无 RLS、无 FORCE RLS**）；
-  hnsw 索引 `(embedding vector_cosine_ops)` + btree `(platform)`。
-  downgrade：`DROP TABLE IF EXISTS rules_kb CASCADE`。
-- `app/domains/rules_kb/models.py`：`Base` + `RulesKbRow`（embedding `Vector(1024)`，
-  jsonb 列用 `JSONB`，**不声明 tenant_id**）。
-- 验收：`uv run alembic upgrade head` 成功；`\d rules_kb` 有 embedding vector(1024) + hnsw 索引；
-  app 角色可 SELECT（db_bootstrap 默认授权）。
-- 验证：`uv run alembic upgrade head && uv run alembic downgrade -1 && uv run alembic upgrade head`（可逆）。
+### Phase 5 — 清理 + 测试硬化
+**T5.1 清理 + 全套**
+- 目标：删 `_chunk` 假打字残留 + `asyncio.sleep`；确认无路径回退假流式（除降级）。
+- 验收：`grep _chunk` 空（或仅历史）；`pytest -q` 全绿（gateway流/真流式/守卫拦截/降级/空检索/既有）；前端 `pnpm build`。
+- **✅ C5**：全绿；真流式为唯一路径（降级除外）。
 
-> **CHECKPOINT 1**：T0 通过（embedding 1024 维实测）+ 表建成可逆。人工确认 → 进阶段 B。
+## 3. 检查点汇总
+| CP | 关口 | 判据 |
+|---|---|---|
+| C0 | 流式原语 | chat_stream 逐 delta、拼接完整 |
+| C1 | prepare 拆分 | 分流正确、既有回归绿 |
+| C2 | 真流式 MVP | 真 token 随 LLM 到达、空检索不流、降级出全文 |
+| C3 | 流式守卫 | 泄露/假引用拦截、守卫后文本落库 |
+| C4 | 前端 | 真打字 + replace |
+| C5 | 硬化 | 全绿、无假流式残留 |
 
----
+## 4. 风险/回滚
+- agent 拆 prepare 动核心路径 → C1 强制既有回归绿兜底。
+- 流式守卫及时性 vs 性能（每 delta 跑正则）→ 粒度可调，先每 delta，C3 看开销。
+- 守卫命中 replace = 受控可见纠正（非旧的每次覆盖），仅出事触发。
+- DashScope 流式不稳 → 降级非流式兜底（C2）。
+- 改的是 chat 流式输出层（增 chat_stream + 重构 converse_stream），git 可回退。
 
-### 阶段 B — 灌库与检索（T3–T4）
-
-**T3｜灌库脚本 scripts/load_rules_kb.py**
-- 复用 service 的 `_load_corpus`/`_resolve_path` 读 `data/rules_kb/*_rules.jsonl`（524 条，按 rule_id 去重）。
-- 每条 embed `title + "\n" + summary + "\n" + content`（截断到模型上限）；批量调 embed_text。
-- 用 `database_admin_url`（psycopg 同步即可，仿 db_bootstrap）upsert：
-  `INSERT ... ON CONFLICT (rule_id) DO UPDATE`（幂等，重跑不翻倍）。
-- 日期字段 null 容错；数组字段（product_category/related_rule_ids/tags）转 jsonb。
-- `--platform` 可选过滤；打印灌入条数。
-- 验收：跑后 `SELECT count(*) FROM rules_kb` ≈ 去重后条数，embedding 非 null；重跑条数不变。
-- 验证：`uv run python scripts/load_rules_kb.py` 两次，count 一致。
-
-**T4｜repository + service 混合检索（核心垂直切片）**
-- `app/domains/rules_kb/repository.py`：`RulesKbRepository.search_filtered(query_emb, platform, site)`
-  → `SELECT <字段>, embedding <=> :q AS dist FROM rules_kb WHERE <platform/site 硬过滤>`
-  （site：精确 OR GLOBAL，对齐现 jsonl 逻辑 service.py:138-140）。corpus 小，取回过滤全集。
-- `app/domains/rules_kb/service.py`：
-  - 抽共享 helper：`_apply_filters`（platform/site）、`_score`（bigram，复用）、`_rrf` 融合。
-  - `search()` 分流：`self.session is None` → jsonl 回退（现逻辑，原样保留）；
-    否则主路径：embed query → repository 取候选 → vector_rank + lexical_rank → RRF（k=60）
-    → top-N → 投影 `_RETURN_FIELDS`。
-  - **表空 / 异常 → 回退 jsonl**（不抛给上层，SPEC 优雅降级）。
-- 验收：session=None 时行为与今日逐字节一致（离线契约不破）；session 有效时 DB 路径返回
-  契约字段齐全、platform/site 隔离成立。
-- 验证：`uv run pytest tests/test_rules_kb_search.py`（全绿，回退路径）。
-
-> **CHECKPOINT 2**：灌库成功 + DB 路径手测命中 + 离线契约恒绿。人工确认 → 进阶段 C。
-
----
-
-### 阶段 C — 验证（T5）
-
-**T5｜DB 集成测试 tests/test_rules_kb_pgvector.py**
-- fixture：连 DB（无 DB 环境 skip，对齐现有 DB 测试惯例）；灌小样本或依赖已灌库。
-- 用例：
-  1. 语义召回：换词 query（语料「封号」← 查「店铺被关停」）向量路径命中。
-  2. platform 硬隔离在 SQL 路径成立（amazon 查询 0 串 ozon）。
-  3. site GLOBAL 适配任意 site 查询。
-  4. RRF：词法精确命中仍靠前。
-  5. 表空 → 回退 jsonl 不抛错。
-  6. `_RETURN_FIELDS` 契约齐全。
-- 验收：新测试通过；离线契约测试仍全绿。
-- 验证：`uv run pytest tests/test_rules_kb_search.py tests/test_rules_kb_pgvector.py`。
-
-> **CHECKPOINT 3**：双测试套件绿 + SPEC §1 不变量逐条对账。人工确认 → 完成/提交。
-
----
-
-## 回滚策略
-- 代码：service `search()` 分流隔离，删 DB 分支即回纯 jsonl；embeddings 改动可单独 revert。
-- DB：`alembic downgrade -1` 删 rules_kb 表（不影响 chat/kb/sourcing 其他域）。
-
-## 非目标（本期不做）
-- PG 中文分词扩展（zhparser）做真 BM25——用 Python bigram，足够。
-- vector top-K 下推 SQL 的规模优化——corpus 小，内存融合；HNSW 索引已备，后续改 repository。
-- 改 embedding 维度 / kb_chunks 表。
+## 5. 执行顺序
+P0 → P1（C1 回归绿）→ P2（C2 MVP 可演示）→ P3 → P4 → P5。C2 是第一个可演示里程碑（真打字）。

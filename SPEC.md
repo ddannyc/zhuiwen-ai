@@ -1,170 +1,162 @@
-# SPEC：rules_kb 检索升级为 pgvector 向量+词法混合
+# SPEC：chat 真实流式输出
 
-> 规格驱动开发文档。把 chat agent `rules_search` 工具背后的 `RulesKbService`
-> 从「jsonl 种子语料 + 中文 bigram 词法打分」升级为「Postgres + pgvector 向量检索
-> 与词法打分混合（RRF 融合）」。契约不变，只换实现（service.py:9 的承诺兑现）。
-
----
-
-## 1. 目标（Objective）
-
-**做什么**：给平台合规规则库（rules_kb 域）加向量语义检索，与现有中文 bigram 词法
-打分**混合**（Reciprocal Rank Fusion），提升召回——语义近但用词不同的规则也能命中，
-同时保留词法对专有名词/编号的精确匹配。
-
-**为什么**：当前纯 bigram 词法，换种说法就漏召回；合规问答漏召回 = 模型自由编造 =
-项目反幻觉红线被击穿。
-
-**面向谁**：chat agent（唯一调用方，经 `rules_search` 工具）。终端用户是跨境电商卖家。
-
-**不变量（北极星）**：
-- `RulesKbService.search()` 签名与返回 `_RETURN_FIELDS` 契约**零改动**。
-- platform/site **硬隔离**绝不松动（查 amazon 绝不串 ozon；GLOBAL site 适配任意 site 查询）。
-- 空检索 → 返回 `[]`，上层确定性兜底「未找到」，绝不编造。
-- LLM/embedding **唯一出口**：litellm SDK 进程内 → DashScope，不直连 provider SDK。
+> 目标：把 chat SSE 的**假流式**（生成完整 reply 再 `_chunk`+`sleep` 假打字）换成
+> **真流式**（LLM 边生成边吐 token）。状态：待确认，批准后进 /plan。
+> （上一份 SPEC——rules_kb pgvector 升级——已完成并合入 main，设计存 git 历史。）
 
 ---
 
-## 2. 架构与数据流
+## 0. 决策（已定）
+
+- **范围**：全部文本回复走真流式（answer / analyze / 非空 rules_search 综述）。
+- **守卫调和**：**预判 + 安全才流** —— 能事前定的守卫（空检索）不流；可能触发文本擦除的
+  守卫（假引用 / 泄露）改为**流式中增量拦截**，不事后覆盖。
+- **降级**：流式调用异常 → 回退现有非流式 `chat()` 一次性生成（不让对话挂）。
+
+---
+
+## 1. 现状（要替换的）
+
+`chat/service.converse_stream`：
+1. `_run` 跑完整 LangGraph agent → 完整 `reply`（`gateway.chat` / `chat_with_tools` 均非流式）。
+2. 全部守卫（空检索覆盖 / 假引用擦除 / 泄露擦除）应用在**完整 reply** 上。
+3. `for delta in _chunk(reply, 10): yield token; sleep(0.02)` —— **假打字**。
+
+终答从哪来：`route` 节点 `chat_with_tools`；首轮若返回 tool_call → `tool_exec` 跑工具
+（rules_search 等）→ 回灌结果 → route 第 2 轮 `chat_with_tools` 出 `msg.content` = 用户可见终答。
+**只有这最后一次内容生成需要流式**；工具路由/执行不流。
+
+---
+
+## 2. 目标架构
 
 ```
-chat agent (rules_search 工具)
-  └─ RulesKbService.search(query, platform, site, limit)
-       ├─ session 为 None / 表空 → 【回退】jsonl 词法路径（现逻辑，离线可跑）
-       └─ session 有效 → 【主路径】混合检索
-            ├─ embed_text([query]) ──litellm SDK──> DashScope text-embedding-v3 (1024d)
-            ├─ RulesKbRepository.search_filtered(platform, site)
-            │     SQL: SELECT ..., embedding <=> :q AS dist
-            │          FROM rules_kb WHERE <platform/site 硬过滤>
-            │     （corpus 极小，取回过滤后全集；附 cosine 距离）
-            ├─ Python 融合：
-            │     vector_rank  = 按 dist 升序
-            │     lexical_rank = 按现有 _score(bigram) 降序
-            │     RRF: score = Σ 1/(k + rank)，k=60
-            └─ 取 top-N，投影 _RETURN_FIELDS
+converse_stream:
+  ① tool_running 占位（同现在）
+  ② 跑 agent 到「工具执行完、待生成终答」——非流式（路由+工具）
+  ③ 终答生成：调 gateway 新增 chat_stream（litellm stream=True）→ 真 token 流
+     - 边收 delta 边过【流式守卫】（见 §3）→ 安全则 yield token
+     - 异常 → 回退非流式 chat() 一次拿全 + 直接发（降级）
+  ④ payload(action) + done（同现在）
 ```
 
-**表设计 `rules_kb`（全局共享，无 tenant_id / 无 RLS）**
+**gateway 新增**：`chat_stream(messages, model) -> AsyncIterator[str]`（litellm
+`acompletion(stream=True)`，逐 chunk 取 `choices[0].delta.content`）。
 
-区别于 `kb_chunks`（租户私有，套 RLS）：平台规则跨租户通用，所有租户共读同一份。
-
-| 列 | 类型 | 来源 |
-|---|---|---|
-| rule_id | uuid PK | jsonl |
-| platform, site, original_language, rule_domain, rule_type | text | jsonl |
-| title, summary, content | text | jsonl |
-| severity, source_type, source_url, version | text | jsonl |
-| effective_date, expiry_date, last_verified_at | date (null 容许) | jsonl |
-| verification_status, confidence | text | jsonl |
-| product_category, related_rule_ids, tags | jsonb | jsonl 数组 |
-| embedding | vector(1024) | embed(title + summary + content 截断) |
-| created_at | timestamptz default now() | — |
-
-索引：`USING hnsw (embedding vector_cosine_ops)` + `(platform)` btree。
-
-**embedding 来源统一**：重写 `app/shared/llm/embeddings.py` 的 `embed_text`，
-从废弃的 httpx 直连 litellm 代理（localhost:4000，config 标「本期未启用」）改为
-`litellm.aembedding(model="openai/text-embedding-v3", api_base=dashscope_base_url,
-api_key=dashscope_api_key, dimensions=1024)`——与 `gateway.chat` 同模式同源。
-`knowledge_base` 域复用同一 `embed_text`，自动受益。
+**agent**：终答生成抽出可流式调用。方案二选一（/plan 定）：
+- A. LangGraph `astream_events` 捕获最终 LLM 节点的 token 事件。
+- B. agent 只跑到「工具结果就绪」，终答生成移到 service 用 `chat_stream` 直调（绕开最后一步图执行）。
+  B 更直接、好控守卫，倾向 B。
 
 ---
 
-## 3. 命令（Commands）
+## 3. 守卫调和（核心）
+
+现 3 守卫（`chat/service._run`）与真流式的关系：
+
+| 守卫 | 触发 | 可事前定？ | 真流式处理 |
+|---|---|---|---|
+| 空检索覆盖（rules_search empty → 安全话术） | 检索返回空 | ✅ 工具执行后、生成前就知 | **不流**：直接发 payload，前端 RuleCiteCard 渲空文案（已实现） |
+| 假引用擦除（`_VERIFY_CLAIM_RE`：非检索却称"据规则库/官方"） | 终答文本含虚假背书 | ❌ 需看文本 | **流式增量拦截**：累积 buffer 持续匹配；命中 → 停流 + correction（换 `_FALSE_CITE_FALLBACK`） |
+| 泄露擦除（`_LEAK_RE`：吐工具名/参数/计划） | 终答文本含内部编排 | ❌ 需看文本 | 同上：增量匹配，命中即停流 + correction（`_LEAK_FALLBACK`） |
+
+**流式守卫机制**：
+- 维护 running buffer，每收到 delta 追加后跑 `_LEAK_RE` /（非检索路径才）`_VERIFY_CLAIM_RE`。
+- 命中 → **立即停止继续吐 token**，发 `replace` 事件让前端用 fallback 文案替换已显示内容，
+  再 payload+done。（仅"出事才覆盖"，正常流不覆盖——区别于旧的每次假打字。）
+- 这是「预判+安全才流」：守卫**全程在线**，不是事后补。绝大多数回复不触发，流畅；少数触发即拦。
+- 落库的 assistant 文本用守卫后的最终文本（命中则 fallback）。
+
+**前端**：新增处理 `replace` 事件（清空当前流式 content 换 fallback）；正常路径无 replace。
+
+---
+
+## 4. 范围
+
+**In**
+- `gateway.chat_stream`（litellm 流式）。
+- `converse_stream` 改真流式 + 流式守卫 + 降级。
+- 终答生成可流式化（agent 方案 B 倾向）。
+- 前端 ChatPane 处理真 token + `replace` 事件。
+- 删 `_chunk` 假打字 + `sleep`。
+
+**Out**
+- 结构化 action（box_list / collect_products / 空 rules_search）不流（短/卡片）。
+- 工具路由/执行流式（无意义）。
+- 改动检索/采集/rules_kb 逻辑。
+
+---
+
+## 5. 命令
 
 ```bash
-# 迁移（建 rules_kb 表 + 扩展 + 索引）
-uv run alembic upgrade head
-
-# 灌库：jsonl → embed → upsert（幂等，按 rule_id ON CONFLICT DO UPDATE）
-uv run python scripts/load_rules_kb.py            # 全量
-uv run python scripts/load_rules_kb.py --platform amazon   # 单平台（可选）
-
-# 测试
-uv run pytest tests/test_rules_kb_search.py       # 离线契约（jsonl 回退路径）
-uv run pytest tests/test_rules_kb_pgvector.py     # DB 集成（需 Postgres+pgvector）
-
-# 跑服务
-uv run uvicorn app.main:app --reload
+docker compose up -d && uv run alembic upgrade head
+uv run uvicorn app.main:app --reload --port 8000   # 真流式 SSE
+uv run python -m app.workers.main
+uv run pytest -q                                   # 含流式单测
+cd web && pnpm dev                                 # 前端验真打字
 ```
 
 ---
 
-## 4. 项目结构（改动清单）
+## 6. 项目结构
 
 ```
-新增：
-  migrations/versions/0004_rules_kb.py        # 建 rules_kb 表 + vector 扩展 + hnsw 索引
-  app/domains/rules_kb/models.py              # ORM：RulesKbRow（无 tenant_id/RLS）
-  app/domains/rules_kb/repository.py          # search_filtered() 向量+过滤 SQL
-  scripts/load_rules_kb.py                    # jsonl → embed → upsert 灌库
-  tests/test_rules_kb_pgvector.py             # DB 集成测试（混合检索/隔离）
-
-改：
-  app/domains/rules_kb/service.py             # search() 内分流：主走 pgvector 混合，
-                                              #   session=None/表空回退 jsonl；
-                                              #   抽出共享 helper（_score/_apply_filters/RRF）
-  app/shared/llm/embeddings.py                # embed_text 改走 litellm SDK→DashScope
-  app/core/config.py                          # +embedding_model/embedding_dim；
-                                              #   rules_kb_path 注释更新（不再标弃用，作回退源）
-  pyproject.toml                              # pgvector pin 收紧（如需）
+app/shared/llm/gateway.py        # + chat_stream(messages, model) -> AsyncIterator[str]
+app/domains/chat/service.py      # converse_stream 改真流式 + 流式守卫 + 降级；删 _chunk
+app/domains/chat/agent.py        # 终答生成可流式化（方案 B：暴露「工具就绪」中间态）
+app/domains/chat/stream_guard.py # ★ 新：增量守卫（buffer + _LEAK_RE/_VERIFY_CLAIM_RE）
+web/src/components/ChatPane.tsx   # 处理真 token + replace 事件
+web/src/lib/contract.ts          # + replace 事件类型
 ```
 
 ---
 
-## 5. 代码风格（Code Style）
+## 7. 代码风格
 
-- 跟随现仓：domain 分层 service/repository/models，跨域只调对方 service。
-- repository **不写** `WHERE tenant_id`——rules_kb 全局表无 RLS，但 platform/site
-  过滤**必须**显式写进 SQL（这是业务隔离，非 RLS）。
-- 中文注释，解释「为什么」而非「做什么」，与现有文件密度一致。
-- 类型注解齐全；async 全程；`list[dict[str, Any]]` 等现有风格。
-- 不引新依赖（pgvector/litellm/sqlalchemy 已在）。RRF 纯 Python 实现，~10 行。
-
----
-
-## 6. 测试策略（Testing Strategy）
-
-- **离线契约（不动现有文件语义）**：`test_rules_kb_search.py` 继续用 `session=None`
-  跑 jsonl 回退路径，全部 9 条断言保持绿（metadata 隔离 / 溯源字段 / 空检索 /
-  GLOBAL site / limit）。这是回退路径的回归网。
-- **DB 集成（新增）**：`test_rules_kb_pgvector.py` 真连 Postgres，先灌小样本，验证：
-  - 语义召回：换词查询（如「店铺被关」vs 语料「封号」）向量能命中、纯词法漏。
-  - platform/site 硬隔离在 SQL 路径同样成立（amazon 查询绝不返 ozon）。
-  - RRF：词法精确命中仍排前；融合不破坏 _RETURN_FIELDS 契约。
-  - 表空 → 回退 jsonl，不抛错。
-  - 无 DB 环境用 pytest marker / fixture skip（对齐现有 DB 测试惯例）。
-- **embeddings**：embed_text 改造后，knowledge_base 既有路径不回归（若有相关测试）。
+- gateway 仍是 LLM 唯一出口；service/agent 不直接调 litellm。
+- 流式守卫与现 `_run` 守卫**同源**（复用 `_LEAK_RE`/`_VERIFY_CLAIM_RE`/fallback 常量），
+  不另写一套规则，防漂移。
+- SSE 事件对齐 `contract.ts`；新增 `replace` 事件，不破坏现有 token/payload/done。
+- async generator 逐 delta yield，背压自然。
 
 ---
 
-## 7. 边界（Boundaries）
+## 8. 测试策略
 
-**永远（Always）**
-- 保 `search()` 签名 + `_RETURN_FIELDS` 投影不变（只暴露这些，不泄 content 全文）。
-- platform/site 硬隔离 + GLOBAL site 适配任意 site 查询。
-- embedding 唯一经 litellm SDK→DashScope；维度对齐 1024（与 kb_chunks 一致）。
-- rules_kb 为全局共享表，无 tenant_id、无 RLS。
-- 空/无 DB 优雅回退 jsonl，离线契约测试恒绿。
-
-**先问（Ask first）**
-- 改 embedding 维度（连带影响 kb_chunks 表与 0002 迁移）。
-- 删除 jsonl 回退路径或 `rules_kb_path` 配置。
-- 引入 PG 中文分词扩展（zhparser/pg_bigm）做真 BM25（当前用 Python bigram，足够）。
-- 任何触及前端 chat 契约（contract.ts ChatAction）的改动。
-
-**绝不（Never）**
-- rules_kb 改成租户私有 / 套 RLS。
-- 绕过 gateway/embeddings 直连 provider SDK。
-- 让 rules_search 在检索失败时自由生成规则（反幻觉红线）。
-- 把 content 全文/内部字段透给上层或前端。
+- **gateway.chat_stream**：mock litellm streaming → 断言逐 delta 产出 + 拼接完整。
+- **converse_stream 真流式**：mock chat_stream 产 N 段 → 断言 yield N 个 token（非 `_chunk` 定长）。
+- **流式守卫拦截**：mock 终答流出含泄露/假引用片段 → 断言中途停流 + 发 `replace`(fallback) + 落库为 fallback。
+- **空检索仍不流**（回归现已修）：empty rules_search → 无 token，只 payload。
+- **降级**：mock chat_stream 抛错 → 回退非流式 chat()，仍出完整回复 + done。
+- 既有 chat 测试（事件顺序/守卫/落库）全绿。
+- 前端：手验真打字（token 逐字到达，非整段跳出）+ 触发泄露时 replace。
 
 ---
 
-## 8. 已知风险
+## 9. 边界
 
-- **DashScope text-embedding-v3 经 litellm**：需实测 `litellm.aembedding` 对 DashScope
-  兼容端点 + `dimensions=1024` 的支持；若不通，回退方案见「先问」。
-- **混合融合质量**：corpus 仅 524 条，全集载入 Python 融合零压力；规模增长后需把
-  vector top-K 下推 SQL（HNSW 索引已建，改 repository 即可，service 不动）。
-- **灌库一致性**：embedding 用 title+summary+content 拼接；改拼接策略需重灌全量。
+**Always**
+- 用户最终看到/落库的必须是**守卫后**文本（流式守卫命中即停+替换）。
+- 流式异常必降级，绝不让对话卡死或半截无终止。
+- gateway 唯一 LLM 出口；守卫规则单一来源。
+
+**Ask first**
+- 是否给 `replace` 事件加动画/提示（UX）。
+- 流式守卫 buffer 检查粒度（每 delta vs 每句）——性能/拦截及时性权衡。
+
+**Never**
+- 不在前端先渲未守卫文本再无声替换成"正常"内容（只允许"出事→fallback"的可见纠正）。
+- 不流结构化卡片 action 的内部数据。
+- 不绕 gateway 直调 provider。
+
+---
+
+## 10. 待决（/plan 时定）
+- agent 终答流式化走 A（astream_events）还是 B（service 直调 chat_stream）。倾向 B。
+- 流式守卫粒度（每 delta / 每句 / 每 N 字）。
+- `replace` 事件前端呈现（直接换 vs 渐隐）。
+
+---
+
+*确认本 SPEC 后进 /plan 做任务分解。*

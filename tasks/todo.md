@@ -1,25 +1,37 @@
-# TODO：rules_kb pgvector 混合检索
+# TODO：chat 真实流式输出
 
-依赖：T0 → (T1, T2) → T3 → T4 → T5。CHECKPOINT 处停下人工确认。
+> 配套 `tasks/plan.md`。检查点(C*)是阶段闸门。
 
-## 阶段 A — 地基
-- [x] **T0** spike：DashScope text-embedding-v3 经 `litellm.aembedding` 实测返回 1024 维 ✅（须 `litellm.drop_params=True`，dimensions 被丢→取 v3 默认 1024）
-- [x] **T1** 重写 `embeddings.py` embed_text 走 litellm SDK→DashScope；config +embedding_model/embedding_dim ✅ commit 4a53821
-- [x] **T2** migration `0004_rules_kb.py`（表+扩展+hnsw索引，无RLS）+ `models.py` RulesKbRow ✅（本 worktree .env 指向独立库 xborder_rkb）
-- [ ] ⏸ **CHECKPOINT 1** — embedding 实测通 + 表可逆，人工确认
+## Phase 0 — gateway 流式原语
+- [ ] T0.1 `gateway.chat_stream`（litellm stream=True → AsyncIterator[str]）
+- [ ] **✅ C0**：逐 delta 产出、拼接完整（mock litellm）
 
-## 阶段 B — 灌库与检索
-- [x] **T3** `scripts/load_rules_kb.py`：jsonl→embed→upsert(ON CONFLICT)，幂等 ✅ 灌入 524 条/6 平台，0 null（注：DashScope embedding 批上限 10）
-- [x] **T4** `repository.py` search_filtered（向量+platform/site过滤）+ `service.py` 混合检索 RRF + jsonl 回退 ✅ 阈值 _VEC_DIST_MAX=0.55 校准
-- [ ] ⏸ **CHECKPOINT 2** — 灌库成功 + DB 路径命中 + `test_rules_kb_search.py` 恒绿，人工确认
+## Phase 1 — agent 拆 prepare()
+- [ ] T1.1 `agent.prepare()`：路由/工具 与 终答生成解耦；`_run` 复用之
+- [ ] **✅ C1**：prepare 分流正确（需生成 vs 卡片/模板）；既有 chat 测试全绿
 
-## 阶段 C — 验证
-- [x] **T5** `tests/test_rules_kb_pgvector.py`：语义召回/隔离/GLOBAL/契约/双回退 ✅ 9 passed
-- [ ] ⏸ **CHECKPOINT 3** — 双测试套件绿 + SPEC §1 不变量对账，人工确认
+## Phase 2 — converse_stream 真流式 + 降级 ★MVP
+- [ ] T2.1 真 token 流：needs_gen → chat_stream 逐 delta yield；删 _chunk+sleep
+- [ ] T2.2 降级：chat_stream 出错 → 回退非流式 chat()
+- [ ] **✅ C2**：真 token 随 LLM 到达；空检索不流；降级出全文 ← 可演示里程碑
 
-## 不变量守则（每任务自检）
-- search() 签名 + _RETURN_FIELDS 不变
-- platform/site 硬隔离 + GLOBAL 适配任意 site
-- embedding 唯一经 litellm SDK→DashScope，1024 维
-- rules_kb 全局表，无 tenant_id/无 RLS
-- 空/无DB 回退 jsonl，离线契约恒绿
+## Phase 3 — 流式守卫
+- [ ] T3.1 `stream_guard.py`：buffer 增量跑 _LEAK_RE/_VERIFY_CLAIM_RE（复用常量）
+- [ ] T3.2 converse_stream 接守卫：命中→停流+replace 事件+落库 fallback
+- [ ] **✅ C3**：泄露/假引用流式拦截；守卫后文本落库
+
+## Phase 4 — 前端
+- [ ] T4.1 ChatPane 真 token + replace 事件处理；contract.ts +replace 类型
+- [ ] **✅ C4**：浏览器真打字 + replace 呈现
+
+## Phase 5 — 清理 + 测试硬化
+- [ ] T5.1 删 _chunk 假打字残留；全套 pytest + 前端 build
+- [ ] **✅ C5**：全绿；真流式唯一路径（降级除外）
+
+## 待决
+- [x] 终答流式化 → **锁 B**（service 直调 chat_stream，agent prepare() 出 gen_messages）
+- [ ] 守卫粒度（每 delta / 每句）—— 先每 delta
+- [ ] replace 前端呈现（直接换 / 渐隐）—— P4 定
+
+## 执行顺序
+P0 → P1(C1) → P2(C2 MVP) → P3 → P4 → P5
