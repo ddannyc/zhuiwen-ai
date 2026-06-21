@@ -57,6 +57,18 @@ class ChatRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def recent_messages(self, conversation_id: str, limit: int) -> list[Message]:
+        """取最近 limit 条（DESC 取，再反转回时间正序）。
+        用于喂 LLM 历史：必须是最近的对话，不能像 list_messages 那样取最早 N 条。"""
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == uuid.UUID(str(conversation_id)))
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(reversed(result.scalars().all()))
+
     async def list_conversations(self, user_id: str, limit: int = 50) -> list[Conversation]:
         # 显式按归属人过滤（业务键，非租户键）；租户隔离仍由 RLS 兜底。
         stmt = (

@@ -219,7 +219,9 @@ class ChatService:
         return await chat(messages=[{"role": "user", "content": content}], model=self.model)
 
     async def _build_llm_history(self, conversation_id: str) -> list[dict[str, str]]:
-        msgs = await self.repo.list_messages(conversation_id, limit=HISTORY_LIMIT)
+        # 取最近 N 条（含刚写入的当前 user 消息）。必须是最近的——否则长对话只喂开头
+        # 几轮，模型看不到用户后续补充的信息，会反复重问。
+        msgs = await self.repo.recent_messages(conversation_id, limit=HISTORY_LIMIT)
         return [
             {"role": m.role, "content": (m.content or "")[:HISTORY_CHAR_CAP]}
             for m in msgs if m.role in ("user", "assistant")

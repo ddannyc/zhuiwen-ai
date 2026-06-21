@@ -29,6 +29,9 @@ class FakeRepo:
         return m
 
     async def list_messages(self, conversation_id, limit=50):
+        return [m for m in self.messages if m.role in ("user", "assistant")][:limit]
+
+    async def recent_messages(self, conversation_id, limit):
         return [m for m in self.messages if m.role in ("user", "assistant")][-limit:]
 
     async def update_conversation_title(self, conversation_id, title):
@@ -172,6 +175,20 @@ async def test_second_message_does_not_regenerate_title(captured):
     svc.repo.title = "SENTINEL"          # 标记，第二条不应覆盖
     await svc.converse("conv-1", "第二条")
     assert svc.repo.title == "SENTINEL"  # 非首条不再生成标题
+
+
+async def test_history_uses_recent_not_earliest(captured):
+    # 长对话（>HISTORY_LIMIT）历史必须取最近、含最新用户消息，否则模型反复重问。
+    from app.domains.chat.prompts import HISTORY_LIMIT
+    svc = _service()
+    for i in range(6):
+        await svc.repo.add_message("c", "user", f"u{i}")
+        await svc.repo.add_message("c", "assistant", f"a{i}")
+    hist = await svc._build_llm_history("c")
+    contents = [h["content"] for h in hist]
+    assert len(hist) <= HISTORY_LIMIT
+    assert "u5" in contents      # 最新用户消息在
+    assert "u0" not in contents  # 最早的被挤出（取最近而非最早）
 
 
 async def test_converse_persists_user_and_assistant(captured):
