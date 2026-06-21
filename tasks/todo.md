@@ -21,8 +21,8 @@
 - [x] **✅ C3**：泄露/假引用流式拦截；守卫后文本落库
 
 ## Phase 4 — 前端
-- [ ] T4.1 ChatPane 真 token + replace 事件处理；contract.ts +replace 类型
-- [ ] **✅ C4**：浏览器真打字 + replace 呈现
+- [x] T4.1 ChatPane 真 token + replace 事件处理；contract.ts +replace 类型
+- [x] **✅ C4**：浏览器真打字 + replace 呈现
 
 ## Phase 5 — 清理 + 测试硬化
 - [ ] T5.1 删 _chunk 假打字残留；全套 pytest + 前端 build

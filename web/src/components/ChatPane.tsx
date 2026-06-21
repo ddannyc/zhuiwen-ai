@@ -51,6 +51,10 @@ export function ChatPane({
       else if (ev.event === "token") {
         content += ev.data.delta;
         setStreaming((s) => s && { ...s, content, tool: null });
+      } else if (ev.event === "replace") {
+        // 流式守卫命中：用 fallback 替换已显示的流式正文（防泄露/假引用残留）。
+        content = ev.data.text;
+        setStreaming((s) => s && { ...s, content, tool: null });
       } else if (ev.event === "payload") {
         // 富结构到位，才挂动作组件（骨架 action 事件无 payload 字段，不能渲）。
         setStreaming((s) => s && { ...s, action: ev.data });

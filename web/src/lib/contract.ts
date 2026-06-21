@@ -69,6 +69,8 @@ export type SseEvent =
   | { event: "action"; data: { type: ChatAction["type"] } }
   | { event: "tool_running"; data: { tool: string; label: string } }
   | { event: "token"; data: { delta: string } }
+  // 流式守卫命中（泄露/假引用）→ 停流，用 text 替换已显示的流式正文（仅出事才发）。
+  | { event: "replace"; data: { text: string } }
   | { event: "payload"; data: ChatAction } // 带 rows/cites/job_id 的完整结构
   | { event: "done"; data: { message_id: string } }
   | { event: "error"; data: { msg: string } };
