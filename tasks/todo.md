@@ -1,0 +1,57 @@
+# TODO：sourcing 客户端化 + 去 Temporal
+
+> 配套 `tasks/plan.md`。逐阶段勾，检查点(C*)是阶段闸门——不过不进下一阶段。
+
+## Phase 0 — 去风险闸门 🚪
+- [ ] **T0** 妙手 `url` fetch 风控实测（真实账号小批量）→ 记录成功率
+  - 闸门：失败则**暂停全计划**，方案重议
+
+## Phase 1 — 队列地基
+- [ ] T1.1 `app/shared/queue/` procrastinate App(PsycopgConnector) + `tenant_session`
+- [ ] T1.2 迁移 `0004_procrastinate`：注入 procrastinate schema（alembic up/down）
+- [ ] T1.3 trivial `ping` task：defer→worker→RLS 隔离验证
+- [ ] T1.A（并行）`sourcing/miaoshou.py`：url_fetch/edit/delete/tk_list_items/shops 封装
+- [ ] **✅ C1**：procrastinate worker 起；trivial task defer→执行→RLS 过；alembic up/down 净
+
+## Phase 2 — ingest 垂直切片 ★MVP
+- [ ] T2.1 迁移 `0005`：collect_jobs 加 post_status/attempts/last_error/source；弃 poll 语义
+- [ ] T2.2 `POST /sourcing/ingest`（收 urls）+ IngestRequest 校验；删旧 /jobs/poll+/done
+- [ ] T2.3 `tasks.post_process`：妙手 fetch + 评分 + 违禁词清洗 + top_n → result
+- [ ] T2.4 `GET /sourcing/jobs/{batch_id}` 返 post_status/result/scores
+- [ ] **✅ C2**：真 URL curl→妙手fetch+评分→done；跨租户隔离 ← **第一个可演示里程碑**
+
+## Phase 3 — 后处理深化
+- [ ] T3.1 翻译 + 图片质检（studio + miaoshou.edit 回写，options 开关）
+- [ ] T3.2 上架 `tk_list_items`（box-id 驱动，tk_auto 可选）
+- [ ] **✅ C3**：全管线按 options 跑通，各段 mock 断言调用链
+
+## Phase 4 — 可靠性
+- [ ] T4.1 cron 兜底 task：扫 pending 超 grace 重投（grace=2min/cron=1min 待确认）
+- [ ] T4.2 幂等：CAS pending/queued→running；done 跳过；上架查重
+- [ ] **✅ C4**：worker kill→cron 重驱→done 且**只上架一次**
+
+## Phase 5 — 去 Temporal
+- [ ] T5.1 `workers/main.py` 改 `run_worker_async`（含 cron）
+- [ ] T5.2 删残留：workflows/activities(Temporal 部分)、config temporal_*、compose temporal、pyproject temporalio、test_sourcing_workflow.py、README
+- [ ] T5.3 `test_e2e_http.py` sourcing 用例改写（ingest→存→InMemory task→done）
+- [ ] **✅ C5**：pytest 全绿且不起 temporal；`grep -rn temporalio app/` 空；compose 仅 db
+
+## Phase 6 — 扩展端 client/
+- [ ] T6.1 MV3 manifest(host 仅 1688) + `scrape.ts` URL 采集器（夹具可测）+ panel
+- [ ] T6.2 `background/queue.ts` 本地队列 + `api/ingest.ts`（JWT POST）
+- [ ] **✅ C6**：浏览器采 URL→回传→采集箱见结果
+
+## Phase 7 — 测试硬化
+- [ ] T7.1 全套：扩展解析器/队列、task InMemory 管线+重试+幂等、ingest e2e+RLS、outbox
+- [ ] **✅ C7**：py + 扩展测试全绿
+
+---
+
+## 待决（执行中定，不阻塞）
+- [ ] ADR-001：grace/cron 周期最终值；procrastinate schema 落 alembic 方式
+- [ ] B：扩展分发渠道 + JWT 注入方式（Phase6 前定）
+- [ ] D：publishing `BulkPublishWorkflow` 删 Temporal 后归宿
+- [ ] 列表级字段预筛（优化项）
+
+## 执行顺序
+T0 → [Phase1 ∥ T1.A] → Phase2(C2) → Phase3 → Phase4 → Phase5 → Phase6 → Phase7
