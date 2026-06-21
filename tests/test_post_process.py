@@ -255,6 +255,52 @@ async def test_post_process_skips_already_done(monkeypatch):
         assert (await SourcingRepository(db).get_job(batch_id)).post_status == "done"
 
 
+async def test_post_process_uses_items_when_no_urls(monkeypatch):
+    """桥接 done→post_process：插件已回传商品(items)时直接评分，不再走妙手 url_fetch。"""
+    import json
+
+    from sqlalchemy import text
+
+    import app.domains.sourcing.tasks as t
+
+    class FakeMS:
+        def url_fetch(self, urls, limit=None):
+            raise AssertionError("有 items 不该再 fetch")
+
+        def delete(self, ids):
+            return {"deleted": 0}
+
+    async def fake_llm(system, user):
+        return [{"i": 0, "score": 90}]
+
+    monkeypatch.setattr(t, "_make_miaoshou", lambda: FakeMS())
+    monkeypatch.setattr(t, "_llm_json", fake_llm)
+
+    tenant = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    async with tenant_session(tenant) as db:
+        await SourcingRepository(db).create_batch(
+            batch_id=batch_id, urls=[], options={"threshold": 70}, market="1688"
+        )
+        await db.execute(
+            text("UPDATE collect_jobs SET result = CAST(:r AS jsonb) WHERE id = :i"),
+            {
+                "r": json.dumps({
+                    "items": [{"id": "1", "title": "耳机", "price_cny": 5, "source_url": "u"}],
+                    "options": {"threshold": 70},
+                }),
+                "i": batch_id,
+            },
+        )
+
+    await _run_worker(tenant, batch_id)
+
+    async with tenant_session(tenant) as db:
+        job = await SourcingRepository(db).get_job(batch_id)
+        assert job.post_status == "done"
+        assert job.result["scores"][0]["pass"] is True
+
+
 async def test_post_process_miaoshou_failure_marks_failed(monkeypatch):
     import app.domains.sourcing.tasks as t
 

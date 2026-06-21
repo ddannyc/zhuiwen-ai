@@ -89,7 +89,11 @@ async def _process(repo: SourcingRepository, batch_id: str) -> dict:
     options = payload.get("options") or {}
 
     miaoshou = _make_miaoshou()
-    cands = miaoshou.url_fetch(urls)
+    # 两种入口：扩展/chat 只给 URL → 妙手 fetch；插件 poll/done 已回传商品 → 直接用 items。
+    if urls:
+        cands = miaoshou.url_fetch(urls)
+    else:
+        cands = payload.get("items") or payload.get("products") or []
     scored = await score_candidates(
         cands,
         threshold=int(options.get("threshold", 70)),

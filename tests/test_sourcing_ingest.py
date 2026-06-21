@@ -80,6 +80,26 @@ async def test_ingest_get_returns_post_status_fields():
     assert gj["source"] == "1688"
 
 
+async def test_collect_done_bridges_to_post_process():
+    """桥接：chat 关键词→/collect→poll→/done 回结果后，自动 defer post_process（post_status→queued）。"""
+    h = {"Authorization": f"Bearer {_token()}"}
+    async with _client() as c:
+        jid = (
+            await c.post("/sourcing/collect", headers=h, json={"keywords": ["杯子"]})
+        ).json()["job_id"]
+        await c.post("/sourcing/jobs/poll", headers=h)
+        done = (
+            await c.post(
+                f"/sourcing/jobs/{jid}/done",
+                headers=h,
+                json={"result": {"items": [{"id": "1", "title": "x", "source_url": "u"}]}},
+            )
+        ).json()
+        assert done["ok"] is True
+        gj = (await c.get(f"/sourcing/jobs/{jid}", headers=h)).json()
+        assert gj["post_status"] in ("queued", "running", "done")
+
+
 async def test_ingest_rejects_non_1688_url():
     h = {"Authorization": f"Bearer {_token()}"}
     async with _client() as c:

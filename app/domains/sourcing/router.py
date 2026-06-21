@@ -53,8 +53,11 @@ async def poll_job(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/done")
-async def job_done(job_id: str, body: JobDoneRequest, db: AsyncSession = Depends(get_db)):
-    res = await SourcingService(db).complete_job(job_id, body.result)
+async def job_done(job_id: str, body: JobDoneRequest, request: Request,
+                   db: AsyncSession = Depends(get_db)):
+    # tenant_id 显式传给 service → 桥接 defer post_process（跨进程不靠 ContextVar）。
+    tenant_id = getattr(request.state, "tenant_id", None)
+    res = await SourcingService(db).complete_job(job_id, body.result, tenant_id=tenant_id)
     if not res["ok"]:
         raise HTTPException(status_code=404, detail="job not found")
     return res

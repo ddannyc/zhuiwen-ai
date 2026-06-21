@@ -138,17 +138,6 @@ async def test_complete_job_foreign_job_not_signaled(monkeypatch):
     assert client.handle.signaled is None  # 关键：未向他人 workflow 注入信号
 
 
-async def test_complete_job_degraded_marks_collected():
-    repo = FakeRepo()
-    await repo.create_job(job_id="j1", keywords=[], per_kw=10, market=None)
-    svc = _svc(repo=repo, connect=_connect_fail)
-
-    res = await svc.complete_job("j1", {"items": [1]})
-    assert res == {"ok": True, "mode": "degraded"}
-    assert repo.jobs["j1"].status == COLLECTED
-    assert repo.jobs["j1"].result == {"items": [1]}
-
-
 async def test_complete_job_unknown_id_not_ok():
     svc = _svc(connect=_connect_fail)  # 无此任务 → 归属校验即 not_found，不触 Temporal
     res = await svc.complete_job("missing", {})

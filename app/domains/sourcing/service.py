@@ -34,22 +34,29 @@ class SourcingService:
             batch_id=batch_id, urls=urls, options=options, market=market,
         )
         await self.repo.session.commit()  # 先持久化 pending（defer 前提交）
+        post_status = await self._defer_post_process(batch_id, tenant_id)
+        return {"batch_id": batch_id, "accepted": len(urls), "post_status": post_status}
 
-        post_status = POST_PENDING
+    async def _defer_post_process(self, batch_id: str, tenant_id: str | None) -> str:
+        """提交后 defer post_process 并置 queued（ADR-001：先提交再 defer，失败留 pending 待 cron）。
+        调用方须已提交批行。返回最终 post_status。
+
+        置 queued 用独立 tenant_session（重设租户 GUC），不复用请求会话——请求会话在
+        commit 后 is_local 租户 GUC 已清，再查会撞 RLS。"""
         try:
             # 延迟导入避免循环（tasks 依赖 queue_app）。每次开/关连接池避免跨事件循环复用。
+            from app.domains.sourcing.repository import SourcingRepository
             from app.domains.sourcing.tasks import post_process
-            from app.shared.queue import queue_app
+            from app.shared.queue import queue_app, tenant_session
 
             async with queue_app.open_async():
                 await post_process.defer_async(batch_id=batch_id, tenant_id=str(tenant_id))
-            await self.repo.set_post_status(batch_id, POST_QUEUED)
-            await self.repo.session.commit()
-            post_status = POST_QUEUED
+            async with tenant_session(str(tenant_id)) as db2:
+                await SourcingRepository(db2).set_post_status(batch_id, POST_QUEUED)
+            return POST_QUEUED
         except Exception as e:  # noqa: BLE001 —— defer 失败不丢数据，cron 兜底
             log.warning("defer post_process 失败，批 %s 留 pending 待 cron 兜底: %s", batch_id, e)
-
-        return {"batch_id": batch_id, "accepted": len(urls), "post_status": post_status}
+            return POST_PENDING
 
     async def start_collect(self, *, tenant_id: str | None, keywords: list[str],
                             per_kw: int = 10, market: str | None = None) -> dict:
@@ -70,15 +77,20 @@ class SourcingService:
         job = await self.repo.claim_next()
         return _serialize(job) if job else None
 
-    async def complete_job(self, job_id: str, result: dict) -> dict:
-        """采集插件 /done 回结果：标 collected 落 result。
+    async def complete_job(self, job_id: str, result: dict, tenant_id: str | None = None) -> dict:
+        """采集插件 /done 回结果：标 collected 落 result，并桥接 defer post_process
+        （评分/翻译/上架自动续跑）。插件回传 {items:[...]} 或 {urls:[...]} 都行。
 
         安全：先按 RLS 校验归属（get_job 走 RLS，他租户不可见 / 非法 id → not_found），
         防跨租户用他人 job_id 注入伪造结果（IDOR）。"""
         if await self.repo.get_job(job_id) is None:
             return {"ok": False, "mode": "not_found"}
         job = await self.repo.mark(job_id, COLLECTED, result=result)
-        return {"ok": job is not None, "mode": "degraded"}
+        if job is None:
+            return {"ok": False, "mode": "not_found"}
+        await self.repo.session.commit()  # 先持久化结果（defer 前提交）
+        post_status = await self._defer_post_process(job_id, tenant_id)
+        return {"ok": True, "mode": "degraded", "post_status": post_status}
 
     async def get_job(self, job_id: str) -> dict | None:
         job = await self.repo.get_job(job_id)

@@ -44,10 +44,10 @@
 - [x] T5.3 测试改写：删 2 个 temporal-mode 单测 + force_degraded fixture（degraded 现为唯一路径）
 - [x] **✅ C5**：pytest 全绿（87）；temporalio 不可导入；compose 仅 db；app 无 temporal 引用
 
-## Phase 6 — 扩展端 client/
-- [ ] T6.1 MV3 manifest(host 仅 1688) + `scrape.ts` URL 采集器（夹具可测）+ panel
-- [ ] T6.2 `background/queue.ts` 本地队列 + `api/ingest.ts`（JWT POST）
-- [ ] **✅ C6**：浏览器采 URL→回传→采集箱见结果
+## Phase 6 — 扩展端 client/ ❌ 砍掉（用现有 1688采集助手插件 + poll/done）
+- [x] 决策：不另建 MV3 扩展；客户端采集走 chat 关键词→pending→插件 poll/done
+- [x] 桥接 done→post_process：插件 /done 回结果后自动 defer post_process（评分/翻译/上架）；
+      post_process 兼容 URL(妙手 fetch)/items(直接评分) 两种入口；_defer 提取为 service 复用
 
 ## Phase 7 — 测试硬化
 - [ ] T7.1 全套：扩展解析器/队列、task InMemory 管线+重试+幂等、ingest e2e+RLS、outbox
