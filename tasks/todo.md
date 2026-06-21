@@ -14,7 +14,7 @@
 - [ ] ⏸ **CHECKPOINT 2** — 灌库成功 + DB 路径命中 + `test_rules_kb_search.py` 恒绿，人工确认
 
 ## 阶段 C — 验证
-- [ ] **T5** `tests/test_rules_kb_pgvector.py`：语义召回/隔离/GLOBAL/RRF/表空回退/契约字段
+- [x] **T5** `tests/test_rules_kb_pgvector.py`：语义召回/隔离/GLOBAL/契约/双回退 ✅ 9 passed
 - [ ] ⏸ **CHECKPOINT 3** — 双测试套件绿 + SPEC §1 不变量对账，人工确认
 
 ## 不变量守则（每任务自检）
