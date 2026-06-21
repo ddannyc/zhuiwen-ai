@@ -12,6 +12,7 @@ import logging
 
 from app.domains.sourcing.ingest import loose_json_array, score_candidates
 from app.domains.sourcing.miaoshou import MiaoshouClient
+from app.domains.sourcing.publish import publish_to_tiktok
 from app.domains.sourcing.repository import SourcingRepository
 from app.shared.queue import queue_app, tenant_session
 
@@ -45,6 +46,10 @@ async def _pick_good_images(images: list[str]) -> list[str]:
     """图片质检选优。真实接 zhuiwen_studio.pick_good_images（外部模块未移植）——
     未接入时 passthrough，单测注入替身。"""
     return images
+
+
+# AI 选 TikTok 类目（title, cate_tree)->cid。默认 None（不选，依赖外部 LLM+类目树）。
+_pick_category = None
 
 
 async def _apply_post_edits(miaoshou, cands: list[dict], scores: list[dict], options: dict) -> dict:
@@ -92,7 +97,8 @@ async def _process(repo: SourcingRepository, batch_id: str) -> dict:
         llm_json=_llm_json,
     )
     edits = await _apply_post_edits(miaoshou, cands, scored["scores"], options)
-    return {
+
+    result = {
         **payload,
         "cands": cands,
         "scores": scored["scores"],
@@ -100,6 +106,16 @@ async def _process(repo: SourcingRepository, batch_id: str) -> dict:
         "passed": scored["passed"],
         "edits": edits,
     }
+
+    # 可选上架：达标 box-id → tk_list_items 编排（认领→认领店铺→预填→可选发布）。
+    if options.get("list_tiktok"):
+        passing_ids = [s["id"] for s in scored["scores"] if s["pass"] and s["id"] is not None]
+        result["publish"] = await publish_to_tiktok(
+            miaoshou, passing_ids,
+            site=options.get("site", "MY"), auto=bool(options.get("tk_auto")),
+            pick_category=_pick_category,
+        )
+    return result
 
 
 @queue_app.task(name="sourcing.post_process")

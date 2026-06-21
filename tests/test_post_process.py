@@ -158,6 +158,45 @@ async def test_post_process_optimize_picks_images(monkeypatch):
     assert any(i == "1" and ch.get("imgUrls") == ["a.jpg"] for i, ch in edits)
 
 
+async def test_post_process_list_tiktok_publishes(monkeypatch):
+    """T3.2：开 list_tiktok+tk_auto → 达标品走上架编排 → result.publish.summary。"""
+    import app.domains.sourcing.tasks as t
+    from app.domains.sourcing.publish import CLAIMED_PATH
+
+    class FakeMS:
+        def url_fetch(self, urls, limit=None):
+            return [{"id": "1", "title": "好品", "images": [], "price_cny": 50, "source_url": urls[0]}]
+
+        def delete(self, ids):
+            return {"deleted": 0}
+
+        def shops(self):
+            return [{"shopId": 77}]
+
+        def tkcall(self, endpoint, body):
+            if endpoint == CLAIMED_PATH:
+                return {"ok": True, "data": {"platformCollectBoxDetailIdMap": {"tiktok": {"1": 1001}}}}
+            if endpoint == "get_shop_collect_item_info":
+                return {"ok": True, "data": {"ossMd5": "m", "shopCollectItemInfo": {"title": "X"}}}
+            return {"ok": True, "data": {}}
+
+    async def fake_llm(system, user):
+        return [{"i": 0, "score": 90}]
+
+    monkeypatch.setattr(t, "_make_miaoshou", lambda: FakeMS())
+    monkeypatch.setattr(t, "_llm_json", fake_llm)
+
+    tenant = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    await _seed_batch(tenant, batch_id, {"threshold": 70, "list_tiktok": True, "tk_auto": True})
+    await _run_worker(tenant, batch_id)
+
+    async with tenant_session(tenant) as db:
+        job = await SourcingRepository(db).get_job(batch_id)
+        assert job.post_status == "done"
+        assert job.result["publish"]["summary"]["published"] == 1
+
+
 async def test_post_process_miaoshou_failure_marks_failed(monkeypatch):
     import app.domains.sourcing.tasks as t
 

@@ -26,8 +26,9 @@
 ## Phase 3 — 后处理深化
 - [x] T3.1 翻译 + 图片质检（编排 + miaoshou.edit/delete 回写，options 开关）
       ⚠ 翻译/质检钩子默认 passthrough：zhuiwen_studio 外部模块未移植，真实接入另列
-- [ ] T3.2 上架 `tk_list_items`（box-id 驱动，tk_auto 可选）
-- [ ] **✅ C3**：全管线按 options 跑通，各段 mock 断言调用链
+- [x] T3.2 上架 `publish_to_tiktok`（box-id 驱动：认领→认领店铺→预填→可选发布）
+      精简：略类目属性补全/用量统计；AI 选类目作钩子(默认跳过)，真实联调再补
+- [x] **✅ C3**：全管线 fetch→评分→翻译→上架按 options 跑通，各段 mock 断言调用链
 
 ## Phase 4 — 可靠性
 - [ ] T4.1 cron 兜底 task：扫 pending 超 grace 重投（grace=2min/cron=1min 待确认）
