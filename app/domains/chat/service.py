@@ -5,7 +5,7 @@
 
 产出对齐前端 web/src/lib/contract.ts：结构化 ChatAction + SSE 事件流。
 """
-import asyncio
+import logging
 import re
 from typing import Any, AsyncIterator
 
@@ -25,7 +25,9 @@ from app.domains.chat.prompts import (
     _VISION_DEFAULT,
 )
 from app.domains.chat.repository import ChatRepository
-from app.shared.llm.gateway import chat
+from app.shared.llm.gateway import chat, chat_stream
+
+log = logging.getLogger(__name__)
 
 
 def _iso(dt) -> str:
@@ -101,39 +103,42 @@ class ChatService:
         } for m in msgs]
 
     # ---- 主入口：跑 agent，返回结构化结果（非流式，给 converse_stream 与单测复用）----
-    async def _run(self, conversation_id: str, user_message: str) -> dict[str, Any]:
-        # 首条消息（落库前会话无消息）→ 跑完用 LLM 生成会话标题。
+    async def _prepare_turn(self, conversation_id: str, user_message: str) -> dict[str, Any]:
+        """落用户消息 + 路由/工具（prepare）+ 首条标题。返回 prep（含 action/needs_gen/
+        gen_messages/static_reply/tools_used）。converse 与 converse_stream 共用。"""
         is_first = not await self.repo.list_messages(conversation_id, limit=1)
         await self.repo.add_message(conversation_id, "user", user_message[:MESSAGE_CHAR_CAP])
         history = await self._build_llm_history(conversation_id)
         messages = [{"role": "system", "content": _ACT_SYSTEM}, *history]
-
         # 合规召回闸：命中合规信号 → 首轮强制 rules_search。
         force_tool = "rules_search" if _COMPLIANCE_RE.search(user_message) else None
-
         prep = await prepare(self.session, messages, model=self.model,
                              force_tool=force_tool, user_message=user_message)
-
         if is_first:
             title = await self._gen_title(user_message)
             if title:
                 await self.repo.update_conversation_title(conversation_id, title)
+        return prep
 
-        action = prep["action"]
-        # 终答生成：需生成 → gen_messages 调 chat（非流式）；否则用事前定的静态回复（空检索）。
-        if prep["needs_gen"]:
-            reply = await chat(prep["gen_messages"], model=self.model)
-        else:
-            reply = prep["static_reply"] or ""
-
-        # 假引用闸：回复声称官方/规则库背书，但本轮没真检索（无 cite）→ 欺骗性幻觉，替换。
+    @staticmethod
+    def _guard(reply: str, action: dict) -> str:
+        """终答文本守卫（防幻觉），同源单一来源：
+        - 假引用闸：非检索却称官方/规则库背书（无 cite）→ 替换。
+        - 泄露闸：吐内部工具名/参数/调用计划 → 替换。"""
         if action.get("type") != "rules_search" and _VERIFY_CLAIM_RE.search(reply):
-            reply = _FALSE_CITE_FALLBACK
-        # 兜底：模型把内部工具名/调用参数/调用计划当回复吐给用户 → 判为泄露，替换为安全话术。
+            return _FALSE_CITE_FALLBACK
         if _LEAK_RE.search(reply):
-            reply = _LEAK_FALLBACK
+            return _LEAK_FALLBACK
+        return reply
 
-        return {"reply": reply, "action": action, "tools_used": prep["tools_used"]}
+    async def _run(self, conversation_id: str, user_message: str) -> dict[str, Any]:
+        prep = await self._prepare_turn(conversation_id, user_message)
+        action = prep["action"]
+        # 终答：需生成 → gen_messages 调 chat（非流式）；否则用事前定的静态回复（空检索）。
+        reply = await chat(prep["gen_messages"], model=self.model) if prep["needs_gen"] \
+            else (prep["static_reply"] or "")
+        return {"reply": self._guard(reply, action), "action": action,
+                "tools_used": prep["tools_used"]}
 
     async def _gen_title(self, message: str) -> str:
         """首条消息生成简短标题。失败不抛（标题非关键路径），返回空串跳过。"""
@@ -157,34 +162,40 @@ class ChatService:
     async def converse_stream(
         self, conversation_id: str, user_message: str
     ) -> AsyncIterator[dict[str, Any]]:
-        """SSE 事件流（对齐 contract.ts SseEvent），两段式：
-        1) 立即推占位（检索中/思考中），消除生成期空白等待；
-        2) 完整生成 + 全部防幻觉守卫（_run）；
-        3) 逐字打字推送已守卫的安全文本（块间延迟，可见打字）。
-        守卫全程生效：用户只会看到守卫后的最终文本，不会先看到未守卫内容。
+        """SSE 事件流（对齐 contract.ts SseEvent）：
+        1) 立即推占位（检索中/思考中）消除生成期空白；
+        2) prepare（路由/工具）；
+        3) **真流式**：needs_gen → chat_stream 边生成边吐 token（流式出错降级非流式一次拿全）；
+           空检索/静态 → 不流，前端卡片渲。
+        守卫：终答累积后做（防幻觉），落库为守卫后文本（实时增量守卫见 P3）。
         """
-        # 1) 立即占位反馈。合规问题确定会检索（召回闸），故直接显示"检索平台规则"。
         compliance = bool(_COMPLIANCE_RE.search(user_message))
         yield {"event": "tool_running",
                "data": {"tool": "thinking",
                         "label": "检索平台规则…" if compliance else "思考中…"}}
 
-        # 2) 完整生成 + 守卫（空检索/泄露/假引用 都在此应用到 reply）
-        out = await self._run(conversation_id, user_message)
-        action, reply, tools_used = out["action"], out["reply"], out["tools_used"]
+        prep = await self._prepare_turn(conversation_id, user_message)
+        action = prep["action"]
 
         yield {"event": "action", "data": {"type": action["type"]}}
-        for t in tools_used:
+        for t in prep["tools_used"]:
             yield {"event": "tool_running", "data": {"tool": t, "label": TOOL_LABELS.get(t, t)}}
 
-        # 3) 逐字打字（已守卫文本，块间小延迟让前端可见地逐步渲染）。
-        #    空检索除外：守卫文案由前端 RuleCiteCard(empty) 渲，若再流式同义文本，会与卡片
-        #    两条「未找到」重叠/覆盖（用户报的 bug）。故空检索不流 token，只发 payload。
-        is_empty_rules = action.get("type") == "rules_search" and action.get("empty")
-        if not is_empty_rules:
-            for delta in _chunk(reply, 10):
-                yield {"event": "token", "data": {"delta": delta}}
-                await asyncio.sleep(0.02)
+        if prep["needs_gen"]:
+            acc = ""
+            try:
+                async for delta in chat_stream(prep["gen_messages"], model=self.model):
+                    acc += delta
+                    yield {"event": "token", "data": {"delta": delta}}
+            except Exception as e:  # noqa: BLE001 —— 流式出错降级：非流式一次拿全 + 整段发
+                log.warning("chat_stream 失败，降级非流式: %s", e)
+                acc = await chat(prep["gen_messages"], model=self.model)
+                if acc:
+                    yield {"event": "token", "data": {"delta": acc}}
+            reply = self._guard(acc, action)
+        else:
+            # 空检索/静态：守卫文案由前端卡片渲，不流 token（避免与卡片文案重叠）。
+            reply = prep["static_reply"] or ""
 
         yield {"event": "payload", "data": action}
         msg = await self.repo.add_message(conversation_id, "assistant", reply, action=action)
@@ -225,10 +236,3 @@ class ChatService:
             {"role": m.role, "content": (m.content or "")[:HISTORY_CHAR_CAP]}
             for m in msgs if m.role in ("user", "assistant")
         ]
-
-
-def _chunk(text: str, size: int = 24) -> list[str]:
-    """把回复切成 token 块（折中：定长切片，保证 SSE 可见地逐块推送）。"""
-    if not text:
-        return []
-    return [text[i : i + size] for i in range(0, len(text), size)]

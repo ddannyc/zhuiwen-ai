@@ -11,9 +11,9 @@
 - [x] **✅ C1**：prepare 分流正确（需生成 vs 卡片/模板）；既有 chat 测试全绿
 
 ## Phase 2 — converse_stream 真流式 + 降级 ★MVP
-- [ ] T2.1 真 token 流：needs_gen → chat_stream 逐 delta yield；删 _chunk+sleep
-- [ ] T2.2 降级：chat_stream 出错 → 回退非流式 chat()
-- [ ] **✅ C2**：真 token 随 LLM 到达；空检索不流；降级出全文 ← 可演示里程碑
+- [x] T2.1 真 token 流：needs_gen → chat_stream 逐 delta yield；删 _chunk+sleep
+- [x] T2.2 降级：chat_stream 出错 → 回退非流式 chat()
+- [x] **✅ C2**：真 token 随 LLM 到达；空检索不流；降级出全文 ← 可演示里程碑
 
 ## Phase 3 — 流式守卫
 - [ ] T3.1 `stream_guard.py`：buffer 增量跑 _LEAK_RE/_VERIFY_CLAIM_RE（复用常量）

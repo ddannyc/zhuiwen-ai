@@ -70,10 +70,16 @@ def captured(monkeypatch):
         sys = messages[0].get("content", "") if messages else ""
         if sys == _TITLE_SYS:           # 标题生成
             return "测试标题"
-        return chat_answers.pop(0) if chat_answers else "（生成的终答）"  # 终答生成
+        return chat_answers.pop(0) if chat_answers else "（生成的终答）"  # 终答生成（非流式/降级）
+
+    async def fake_chat_stream(messages, model="x", **kw):  # 终答真流式
+        text = chat_answers.pop(0) if chat_answers else "（生成的终答）"
+        for i in range(0, len(text), 8):  # 切小块模拟逐 token 到达
+            yield text[i:i + 8]
 
     monkeypatch.setattr("app.domains.chat.agent.chat_with_tools", fake_cwt)
     monkeypatch.setattr(service_mod, "chat", fake_chat)
+    monkeypatch.setattr(service_mod, "chat_stream", fake_chat_stream)
     monkeypatch.setattr(service_mod, "ChatRepository", FakeRepo)
     return types.SimpleNamespace(calls=calls, responses=responses, choices=choices,
                                  chat_answers=chat_answers)
@@ -239,6 +245,30 @@ async def test_converse_stream_event_order(captured):
     assert payload["data"]["type"] == "rules_search"
     # done 带落库 message_id
     assert events[-1]["data"]["message_id"]
+
+
+async def test_converse_stream_real_tokens_from_chat_stream(captured):
+    """T2：token 来自 chat_stream 逐 delta（真流式），非旧的定长 _chunk。"""
+    captured.chat_answers.append("一" * 20)  # fake_chat_stream 切 8 字/块 → 3 段
+    events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
+    tokens = [e["data"]["delta"] for e in events if e["event"] == "token"]
+    assert len(tokens) == 3              # 3 个真 delta
+    assert "".join(tokens) == "一" * 20
+
+
+async def test_converse_stream_fallback_on_stream_error(captured, monkeypatch):
+    """T2.2：chat_stream 抛错 → 降级非流式 chat() 一次拿全 + 整段发，仍 done。"""
+    async def boom(messages, model="x", **kw):
+        raise RuntimeError("stream down")
+        yield  # pragma: no cover —— 使其成为 async generator
+
+    monkeypatch.setattr(service_mod, "chat_stream", boom)
+    captured.chat_answers.append("降级生成的完整回复")
+    events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
+    names = [e["event"] for e in events]
+    tokens = "".join(e["data"]["delta"] for e in events if e["event"] == "token")
+    assert tokens == "降级生成的完整回复"   # 来自降级 chat()
+    assert names[-1] == "done" and "payload" in names
 
 
 async def test_converse_stream_token_reassembles_reply(captured):
