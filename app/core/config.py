@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     chat_model: str = "qwen-plus"
     dashscope_api_key: str = ""  # 阿里百炼 Key（DashScope 兼容端点）
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    # ↑ 本地无 key 调试：把它指向 mock（http://localhost:4000），api_key 随意。
+    # chat 需真实 DASHSCOPE_API_KEY（.env 配）。不提供 mock 端点。
 
     # embeddings 仍走 OpenAI 兼容端点（knowledge_base 域用，本期未启用）
     litellm_base_url: str = "http://localhost:4000"

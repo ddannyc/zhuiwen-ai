@@ -2,8 +2,7 @@
 
 LiteLLM **SDK 进程内**调用（无独立代理服务）：在本进程完成 provider 路由、
 请求/响应在 OpenAI 格式与 provider 格式间翻译、工具调用归一、按租户 metadata 归因。
-默认打阿里百炼 (DashScope) OpenAI 兼容端点；本地无 key 时把 dashscope_base_url
-指向 scripts/mock_llm_server.py 即可。
+默认打阿里百炼 (DashScope) OpenAI 兼容端点，需 .env 配真实 DASHSCOPE_API_KEY。
 
 业务代码（agent/service）不直接调 litellm/provider SDK，只调这里。
 """
@@ -17,7 +16,7 @@ litellm.drop_params = True  # provider 不支持的参数自动丢弃，避免 4
 
 
 def _params(model: str | None) -> dict:
-    # model 加 openai/ 前缀 → 走指定 api_base 的 OpenAI 兼容端点（DashScope / mock）。
+    # model 加 openai/ 前缀 → 走指定 api_base 的 OpenAI 兼容端点（DashScope）。
     return {
         "model": f"openai/{model or settings.chat_model}",
         "api_base": settings.dashscope_base_url,
