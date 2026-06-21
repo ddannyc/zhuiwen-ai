@@ -16,9 +16,9 @@
 - [x] **✅ C2**：真 token 随 LLM 到达；空检索不流；降级出全文 ← 可演示里程碑
 
 ## Phase 3 — 流式守卫
-- [ ] T3.1 `stream_guard.py`：buffer 增量跑 _LEAK_RE/_VERIFY_CLAIM_RE（复用常量）
-- [ ] T3.2 converse_stream 接守卫：命中→停流+replace 事件+落库 fallback
-- [ ] **✅ C3**：泄露/假引用流式拦截；守卫后文本落库
+- [x] T3.1 `stream_guard.py`：buffer 增量跑 _LEAK_RE/_VERIFY_CLAIM_RE（复用常量）
+- [x] T3.2 converse_stream 接守卫：命中→停流+replace 事件+落库 fallback
+- [x] **✅ C3**：泄露/假引用流式拦截；守卫后文本落库
 
 ## Phase 4 — 前端
 - [ ] T4.1 ChatPane 真 token + replace 事件处理；contract.ts +replace 类型

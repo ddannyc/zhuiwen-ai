@@ -271,6 +271,32 @@ async def test_converse_stream_fallback_on_stream_error(captured, monkeypatch):
     assert names[-1] == "done" and "payload" in names
 
 
+async def test_converse_stream_leak_replace_midstream(captured, monkeypatch):
+    """T3.2：流式终答中途吐泄露 → 停流 + 发 replace(fallback)，落库为 fallback，不泄露。"""
+    async def leaky_stream(messages, model="x", **kw):
+        for d in ["我先", "调用 rules", "_search 工具帮你查"]:  # 凑出 rules_search → 命中
+            yield d
+
+    monkeypatch.setattr(service_mod, "chat_stream", leaky_stream)
+    svc = _service()
+    events = [ev async for ev in svc.converse_stream("conv-1", "随便聊")]
+    names = [e["event"] for e in events]
+    replace = [e for e in events if e["event"] == "replace"]
+
+    assert replace and "抱歉" in replace[0]["data"]["text"]
+    # 泄露片段不应作为最终用户文本：落库为 fallback，不含 rules_search
+    assistant = [m for m in svc.repo.messages if m.role == "assistant"][0]
+    assert "rules_search" not in assistant.content and "抱歉" in assistant.content
+    assert names[-1] == "done"
+
+
+async def test_converse_stream_clean_no_replace(captured):
+    """正常回复不发 replace（仅出事才可见纠正）。"""
+    captured.chat_answers.append("美国宠物用品蓝海明显，建议聚焦智能喂食器。")
+    events = [ev async for ev in _service().converse_stream("conv-1", "选品建议")]
+    assert not any(e["event"] == "replace" for e in events)
+
+
 async def test_converse_stream_token_reassembles_reply(captured):
     full = "这是一段较长的回复用于验证 token 切块能拼回原文。" * 2
     captured.chat_answers.append(full)

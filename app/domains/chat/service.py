@@ -25,6 +25,7 @@ from app.domains.chat.prompts import (
     _VISION_DEFAULT,
 )
 from app.domains.chat.repository import ChatRepository
+from app.domains.chat.stream_guard import StreamGuard, guard_text
 from app.shared.llm.gateway import chat, chat_stream
 
 log = logging.getLogger(__name__)
@@ -34,34 +35,13 @@ def _iso(dt) -> str:
     return dt.isoformat() if dt is not None else ""
 
 
-# 泄露探测：内部工具名（snake_case，绝不该出现在用户回复）、调用参数 JSON、
-# 以及模型把"调用计划/反问是否调用"当回复正文吐出的话术。命中即判为内部过程泄露。
-_LEAK_RE = re.compile(
-    r"rules_search|box_list|box_count|box_delete|box_translate|box_list_tiktok|collect_products"
-    r'|"\s*(?:query|platform|keywords)\s*"\s*:'
-    r"|是否需要我.{0,12}(?:发起|调用|查询)"
-    r"|(?:立即|请|我将|让我)\s*调用.{0,8}工具"
-    r"|发起(?:该|这个|此)?查询",
-    re.IGNORECASE,
-)
-_LEAK_FALLBACK = (
-    "抱歉，我刚才没能正确处理这个问题。请换种说法再问一次，或更具体地描述你的需求。"
-)
-
 # 合规召回闸：用户问题含这些信号 → 强制走 rules_search，不让弱模型漏路由后自由编。
 # 多召回无妨（检索不到由空检索硬守卫兜「未找到」），漏召回才危险。
 _COMPLIANCE_RE = re.compile(
     r"促销|规则|规范|政策|合规|禁售|限售|禁限售|类目|准入|认证|资质|知识产权|商标|侵权"
     r"|处罚|罚款|罚金|封号|封禁|违规|降权|佣金|费率|费用|关税|税|发票|退货|退款|争议|审核|资料要求|文件要求"
 )
-# 假引用闸：回复声称官方/规则库背书，但本轮没真检索（action≠rules_search）→ 欺骗性幻觉。
-_VERIFY_CLAIM_RE = re.compile(
-    r"依据官方|官方文档|官方规则|规则库|附来源|经核查|官方政策|已(?:通过|经).{0,6}(?:验证|核查)"
-)
-_FALSE_CITE_FALLBACK = (
-    "抱歉，这个问题我未能从平台规则库取证，无法给出确证的合规结论。"
-    "请以平台官方最新公告为准，或换个更具体的问法以便我检索。"
-)
+# 终答防幻觉守卫（泄露/假引用）单一来源在 stream_guard：非流式 guard_text + 流式 StreamGuard。
 
 
 class ChatService:
@@ -120,24 +100,13 @@ class ChatService:
                 await self.repo.update_conversation_title(conversation_id, title)
         return prep
 
-    @staticmethod
-    def _guard(reply: str, action: dict) -> str:
-        """终答文本守卫（防幻觉），同源单一来源：
-        - 假引用闸：非检索却称官方/规则库背书（无 cite）→ 替换。
-        - 泄露闸：吐内部工具名/参数/调用计划 → 替换。"""
-        if action.get("type") != "rules_search" and _VERIFY_CLAIM_RE.search(reply):
-            return _FALSE_CITE_FALLBACK
-        if _LEAK_RE.search(reply):
-            return _LEAK_FALLBACK
-        return reply
-
     async def _run(self, conversation_id: str, user_message: str) -> dict[str, Any]:
         prep = await self._prepare_turn(conversation_id, user_message)
         action = prep["action"]
         # 终答：需生成 → gen_messages 调 chat（非流式）；否则用事前定的静态回复（空检索）。
         reply = await chat(prep["gen_messages"], model=self.model) if prep["needs_gen"] \
             else (prep["static_reply"] or "")
-        return {"reply": self._guard(reply, action), "action": action,
+        return {"reply": guard_text(reply, action), "action": action,
                 "tools_used": prep["tools_used"]}
 
     async def _gen_title(self, message: str) -> str:
@@ -182,17 +151,25 @@ class ChatService:
             yield {"event": "tool_running", "data": {"tool": t, "label": TOOL_LABELS.get(t, t)}}
 
         if prep["needs_gen"]:
-            acc = ""
+            guard = StreamGuard(action)
+            reply = ""
             try:
                 async for delta in chat_stream(prep["gen_messages"], model=self.model):
-                    acc += delta
+                    fallback = guard.feed(delta)  # 流式增量守卫：全程在线
+                    if fallback is not None:
+                        # 命中守卫（泄露/假引用）→ 停流，发 replace 让前端换 fallback。
+                        reply = fallback
+                        yield {"event": "replace", "data": {"text": fallback}}
+                        break
                     yield {"event": "token", "data": {"delta": delta}}
+                else:
+                    reply = guard.text  # 正常流完，无命中
             except Exception as e:  # noqa: BLE001 —— 流式出错降级：非流式一次拿全 + 整段发
                 log.warning("chat_stream 失败，降级非流式: %s", e)
-                acc = await chat(prep["gen_messages"], model=self.model)
-                if acc:
-                    yield {"event": "token", "data": {"delta": acc}}
-            reply = self._guard(acc, action)
+                raw = await chat(prep["gen_messages"], model=self.model)
+                reply = guard_text(raw, action)
+                if reply:
+                    yield {"event": "token", "data": {"delta": reply}}
         else:
             # 空检索/静态：守卫文案由前端卡片渲，不流 token（避免与卡片文案重叠）。
             reply = prep["static_reply"] or ""
