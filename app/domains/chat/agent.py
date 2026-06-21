@@ -82,15 +82,15 @@ TOOLS: list[dict] = [
     }},
     {"type": "function", "function": {
         "name": "collect_products",
-        "description": "从 0 全自动采集选品（下发采集任务给浏览器插件）。",
+        "description": ("下发自动采集任务给浏览器插件（仅排队采集，不含翻译/上架——"
+                        "那些是后续工作流步骤，本工具不执行，勿向用户声称已翻译/已上架）。"),
+        # 只声明 impl 真消费的参数（keywords/perKw/market）。翻译/上架等后处理由
+        # sourcing 工作流的 activity 负责（当前为桩），不在此工具暴露，避免模型"设置"
+        # 实际不发生的动作（项目反幻觉纪律）。
         "parameters": {"type": "object", "properties": {
             "keywords": {"type": "array", "items": {"type": "string"}},
             "perKw": {"type": "integer"},
-            "topN": {"type": "integer"},
-            "lang": {"type": "string"},
-            "translate": {"type": "boolean"},
-            "listTiktok": {"type": "boolean"},
-            "tkAuto": {"type": "boolean"},
+            "market": {"type": "string", "description": "目标市场/站点，如 my / us"},
         }},
     }},
 ]

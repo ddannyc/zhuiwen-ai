@@ -181,6 +181,15 @@ async def test_sourcing_lifecycle_and_rls():
         assert (await c.get(f"/sourcing/jobs/{jid}", headers=other)).status_code == 404
 
 
+async def test_sourcing_malformed_job_id_returns_404():
+    # 评审 #2：非法 uuid 路径参数应 404（资源不存在），不得 500（未捕异常）。
+    h = {"Authorization": f"Bearer {_token()}"}
+    async with _client() as c:
+        assert (await c.get("/sourcing/jobs/not-a-uuid", headers=h)).status_code == 404
+        r = await c.post("/sourcing/jobs/not-a-uuid/done", headers=h, json={"result": {}})
+        assert r.status_code == 404
+
+
 def _token() -> str:
     # 全新随机租户/用户（RLS 列是 uuid）。每调一次即一个干净隔离的租户。
     import uuid

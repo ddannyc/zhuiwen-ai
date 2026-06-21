@@ -232,3 +232,52 @@ async def test_converse_stream_token_reassembles_reply(captured):
     events = [ev async for ev in _service().converse_stream("conv-1", "随便聊")]
     tokens = "".join(e["data"]["delta"] for e in events if e["event"] == "token")
     assert tokens == full  # 切块无损
+
+
+# ---- collect_products 工具 schema↔impl 契约（评审 #1）----
+def _collect_schema() -> dict:
+    from app.domains.chat.agent import TOOLS
+    return next(t["function"] for t in TOOLS if t["function"]["name"] == "collect_products")
+
+
+def test_collect_products_schema_only_advertises_wired_params():
+    # schema 不得声明 impl 未消费的参数：否则模型会"设置"翻译/上架等实际不发生的动作，
+    # 违反项目反幻觉纪律。t_collect_products 只消费 keywords / perKw / market。
+    props = set(_collect_schema()["parameters"]["properties"])
+    assert props == {"keywords", "perKw", "market"}, f"schema 暴露了未接线参数: {props}"
+
+
+def test_collect_products_schema_exposes_market():
+    # market 被 impl 消费 → 必须在 schema 里，否则模型永远填不进，market 列恒 None。
+    assert "market" in _collect_schema()["parameters"]["properties"]
+
+
+async def test_collect_products_passes_market_through(captured):
+    # 行为契约：模型给的 market 透传到 SourcingService.start_collect，并进结构化 action。
+    import types
+    import app.domains.chat.agent as agent_mod
+
+    recorded = {}
+
+    async def fake_start_collect(*, tenant_id, keywords, per_kw, market):
+        recorded.update(tenant_id=tenant_id, keywords=keywords, per_kw=per_kw, market=market)
+        return {"job_id": "job-xyz", "mode": "degraded"}
+
+    captured.responses.append(_tool_call(
+        "collect_products", {"keywords": ["杯子"], "perKw": 20, "market": "my"}))
+    captured.responses.append(_final("已下发采集任务……"))
+
+    # 用假 SourcingService 注入，避免真连 Temporal/DB
+    monkey = types.SimpleNamespace(start_collect=fake_start_collect)
+    orig = agent_mod.SourcingService
+    agent_mod.SourcingService = lambda session: monkey
+    try:
+        out = await _service().converse("conv-1", "按马来西亚采集每词20个")
+    finally:
+        agent_mod.SourcingService = orig
+
+    assert out["action"]["type"] == "collect_products"
+    assert out["action"]["job_id"] == "job-xyz"
+    assert recorded["keywords"] == ["杯子"]
+    assert recorded["per_kw"] == 20
+    assert recorded["market"] == "my"  # market 真透传

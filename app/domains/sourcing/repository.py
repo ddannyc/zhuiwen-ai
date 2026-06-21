@@ -18,6 +18,15 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_uuid(job_id: str) -> uuid.UUID | None:
+    # 非法 uuid（如来自 URL 路径的乱码）返回 None，让上层走"任务不存在 → 404"，
+    # 而非 ValueError 冒泡成 500。
+    try:
+        return uuid.UUID(str(job_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 class SourcingRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -35,7 +44,10 @@ class SourcingRepository:
         return job
 
     async def get_job(self, job_id: str) -> CollectJob | None:
-        return await self.session.get(CollectJob, uuid.UUID(str(job_id)))
+        uid = _as_uuid(job_id)
+        if uid is None:
+            return None
+        return await self.session.get(CollectJob, uid)
 
     async def claim_next(self) -> CollectJob | None:
         """采集插件 poll：认领最早的 pending 任务并置 collecting。
