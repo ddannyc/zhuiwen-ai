@@ -6,6 +6,8 @@ LiteLLM **SDK 进程内**调用（无独立代理服务）：在本进程完成 
 
 业务代码（agent/service）不直接调 litellm/provider SDK，只调这里。
 """
+from typing import AsyncIterator
+
 import litellm
 
 from app.core.config import get_settings
@@ -29,6 +31,23 @@ def _params(model: str | None) -> dict:
 async def chat(messages: list[dict], model: str | None = None, **kwargs) -> str:
     resp = await litellm.acompletion(messages=messages, **_params(model), **kwargs)
     return resp.choices[0].message.content or ""
+
+
+async def chat_stream(
+    messages: list[dict], model: str | None = None, **kwargs
+) -> AsyncIterator[str]:
+    """流式对话：litellm stream=True，逐 chunk 吐 delta 文本（空块跳过）。
+    供 chat 域 converse_stream 做真实 token 流（终答生成）；工具调用不走这里。"""
+    resp = await litellm.acompletion(
+        messages=messages, stream=True, **_params(model), **kwargs
+    )
+    async for chunk in resp:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0].delta, "content", None)
+        if delta:
+            yield delta
 
 
 async def chat_with_tools(

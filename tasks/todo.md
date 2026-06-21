@@ -3,8 +3,8 @@
 > 配套 `tasks/plan.md`。检查点(C*)是阶段闸门。
 
 ## Phase 0 — gateway 流式原语
-- [ ] T0.1 `gateway.chat_stream`（litellm stream=True → AsyncIterator[str]）
-- [ ] **✅ C0**：逐 delta 产出、拼接完整（mock litellm）
+- [x] T0.1 `gateway.chat_stream`（litellm stream=True → AsyncIterator[str]）
+- [x] **✅ C0**：逐 delta 产出、拼接完整（mock litellm）
 
 ## Phase 1 — agent 拆 prepare()
 - [ ] T1.1 `agent.prepare()`：路由/工具 与 终答生成解耦；`_run` 复用之
