@@ -16,6 +16,7 @@ import pytest
 import app.domains.chat.agent as agent_mod
 from app.core.config import get_settings
 from app.main import app
+from app.shared.auth.jwt import issue_token
 
 
 def _db_reachable() -> bool:
@@ -142,3 +143,45 @@ async def test_ownership_isolation_same_tenant(mock_llm):
         bob_list = (await c.get("/chat/conversations",
                                 headers={"Authorization": f"Bearer {tb}"})).json()
         assert all(conv["title"] != "alice私有" for conv in bob_list)
+
+
+async def test_sourcing_lifecycle_and_rls():
+    """sourcing 采集任务全生命周期（真 PG + RLS，Temporal 未起→降级直写库）：
+    collect→pending→poll 认领(collecting)→done(collected+result)。poll 走
+    claim_next + _serialize，正是 func.now() MissingGreenlet 回归点。
+    跨租户：另一租户 poll 取不到、GET 他人任务 404。"""
+    # 每次用全新随机租户，避免历史残留 pending 被 FIFO poll 误认领（测试隔离）。
+    alice = {"Authorization": f"Bearer {_token()}"}
+    other = {"Authorization": f"Bearer {_token()}"}
+    async with _client() as c:
+        # 下发（Temporal 不可达 → mode degraded，pending 行落库）
+        j = (await c.post("/sourcing/collect", headers=alice,
+                          json={"keywords": ["杯子", "水壶"], "per_kw": 15, "market": "my"})).json()
+        jid = j["job_id"]
+        assert j["mode"] == "degraded"
+        assert (await c.get(f"/sourcing/jobs/{jid}", headers=alice)).json()["status"] == "pending"
+
+        # 插件认领：claim_next 置 collecting 并序列化返回（func.now 回归点）
+        poll = (await c.post("/sourcing/jobs/poll", headers=alice)).json()
+        assert poll["job"] is not None and poll["job"]["id"] == jid
+        assert poll["job"]["status"] == "collecting"
+
+        # 回结果：降级直接标 collected + 落 result
+        done = (await c.post(f"/sourcing/jobs/{jid}/done", headers=alice,
+                             json={"result": {"items": [{"t": "A"}, {"t": "B"}]}})).json()
+        assert done["ok"] is True
+        got = (await c.get(f"/sourcing/jobs/{jid}", headers=alice)).json()
+        assert got["status"] == "collected"
+        assert got["result"]["items"] == [{"t": "A"}, {"t": "B"}]
+
+        # 跨租户隔离：tenant-B 认领不到 A 的任务、GET A 的任务 404
+        # 先给 A 造一个新 pending，确保队列里有 A 的任务可被（错误地）取到
+        await c.post("/sourcing/collect", headers=alice, json={"keywords": ["A私有"], "per_kw": 5})
+        assert (await c.post("/sourcing/jobs/poll", headers=other)).json()["job"] is None
+        assert (await c.get(f"/sourcing/jobs/{jid}", headers=other)).status_code == 404
+
+
+def _token() -> str:
+    # 全新随机租户/用户（RLS 列是 uuid）。每调一次即一个干净隔离的租户。
+    import uuid
+    return issue_token(user_id=str(uuid.uuid4()), tenant_id=str(uuid.uuid4()))

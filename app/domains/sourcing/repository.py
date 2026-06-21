@@ -4,11 +4,18 @@
 poll 的认领用 FOR UPDATE SKIP LOCKED，防多个采集插件实例抢到同一任务。
 """
 import uuid
+from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.sourcing.models import COLLECTING, PENDING, CollectJob
+
+
+def _now() -> datetime:
+    # 用 Python 时间戳赋值 updated_at，而非 func.now() SQL 表达式：后者在 flush 后
+    # 会让该列 expire，随后序列化读取触发异步惰性刷新 → MissingGreenlet。
+    return datetime.now(timezone.utc)
 
 
 class SourcingRepository:
@@ -44,7 +51,7 @@ class SourcingRepository:
         if job is None:
             return None
         job.status = COLLECTING
-        job.updated_at = func.now()
+        job.updated_at = _now()
         await self.session.flush()
         return job
 
@@ -58,7 +65,7 @@ class SourcingRepository:
             job.result = result
         if error is not None:
             job.error = error
-        job.updated_at = func.now()
+        job.updated_at = _now()
         await self.session.flush()
         return job
 
