@@ -7,7 +7,7 @@
   - 闸门：失败则**暂停全计划**，方案重议
 
 ## Phase 1 — 队列地基
-- [ ] T1.1 `app/shared/queue/` procrastinate App(PsycopgConnector) + `tenant_session`
+- [x] T1.1 `app/shared/queue/` procrastinate App(PsycopgConnector) + `tenant_session`
 - [ ] T1.2 迁移 `0004_procrastinate`：注入 procrastinate schema（alembic up/down）
 - [ ] T1.3 trivial `ping` task：defer→worker→RLS 隔离验证
 - [ ] T1.A（并行）`sourcing/miaoshou.py`：url_fetch/edit/delete/tk_list_items/shops 封装
