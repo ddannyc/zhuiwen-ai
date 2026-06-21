@@ -38,7 +38,7 @@
 - [x] **✅ C4**：双 defer→CAS 只一个跑；崩溃 running 超 grace 回收重投；正在跑的不误回收
 
 ## Phase 5 — 去 Temporal
-- [ ] T5.1 `workers/main.py` 改 `run_worker_async`（含 cron）
+- [x] T5.1 `workers/main.py` 改 procrastinate `run_worker_async`（含 cron periodic 生效）
 - [ ] T5.2 删残留：workflows/activities(Temporal 部分)、config temporal_*、compose temporal、pyproject temporalio、test_sourcing_workflow.py、README
 - [ ] T5.3 `test_e2e_http.py` sourcing 用例改写（ingest→存→InMemory task→done）
 - [ ] **✅ C5**：pytest 全绿且不起 temporal；`grep -rn temporalio app/` 空；compose 仅 db

@@ -1,42 +1,25 @@
 """Worker 进程入口：python -m app.workers.main
 
-与 API 进程共享同一份代码（同仓库、同 import），只是启动入口不同。
-长流程、批量任务跑在这里，不占用 API 的请求处理能力。
+procrastinate worker：跑 sourcing 后处理长流程（post_process：妙手 fetch→评分→翻译→上架）
++ cron 兜底（requeue_stale 每分钟扫掉队批重投）。替代旧的 workflow 引擎 worker。
 
-当前注册 sourcing 域的采集长流程（CollectWorkflow + activities）。商品采集可能
-拖很久、中途插件失败要能重试、断点恢复 —— 正是 Temporal 擅长、LangGraph/agent
-loop 不负责的那一层。Temporal 未启动时本进程仅打印提示并空转，不影响 API 降级运行。
+与 API 进程共享同一份代码、同一 Postgres，只是启动入口不同：长流程跑这里，不占 API
+请求处理能力。导入 sourcing.tasks 触发 task 注册；run_worker_async 自动调度 periodic。
 """
 import asyncio
 import logging
 
-from app.core.config import get_settings
-from app.domains.sourcing.activities import ALL_ACTIVITIES
-from app.domains.sourcing.workflows import CollectWorkflow
+import app.domains.sourcing.tasks  # noqa: F401 —— 注册 post_process + requeue periodic
+from app.shared.queue import queue_app
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
-async def main():
-    settings = get_settings()
-    try:
-        from temporalio.client import Client
-        from temporalio.worker import Worker
-
-        client = await Client.connect(settings.temporal_host)
-        worker = Worker(
-            client,
-            task_queue=settings.sourcing_task_queue,
-            workflows=[CollectWorkflow],
-            activities=ALL_ACTIVITIES,
-        )
-        log.info("sourcing worker 启动：task_queue=%s", settings.sourcing_task_queue)
-        await worker.run()
-    except Exception as e:
-        log.warning("Temporal 不可达（%s），worker 空转。API 仍以降级模式处理采集任务。", e)
-        while True:
-            await asyncio.sleep(3600)
+async def main() -> None:
+    log.info("sourcing procrastinate worker 启动：queues=all")
+    async with queue_app.open_async():
+        await queue_app.run_worker_async(install_signal_handlers=True)
 
 
 if __name__ == "__main__":
