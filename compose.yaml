@@ -1,16 +1,17 @@
-# 本地开发数据库：Postgres 17 + pgvector（官方镜像，零自建）。
-# 解锁本地端到端：起库 → alembic 跑 0001-0003 迁移 → uvicorn / worker 实测。
+# 本地开发依赖：Postgres 17 + pgvector，外加 Temporal dev server（均官方镜像，零自建）。
+# 解锁本地端到端：起 db+temporal → alembic 跑 0001-0003 迁移 → uvicorn / worker 实测。
 #
 # 用法：
-#   docker compose up -d            # 起库（首次自动跑 docker/postgres/init/*.sql）
+#   docker compose up -d            # 起 db + temporal（首次自动跑 docker/postgres/init/*.sql）
 #   alembic upgrade head            # 跑迁移建表+RLS（env.py 自动用 database_admin_url 超管连接）
 #   uvicorn app.main:app --reload   # API
-#   python -m app.workers.main      # worker（Temporal 未起则降级空转）
-#   docker compose down -v          # 删库重置（重测 RLS 隔离时用）
+#   python -m app.workers.main      # worker（注册 CollectWorkflow；Temporal 未起则降级空转）
+#   docker compose down -v          # 删库重置（重测 RLS 隔离时用；Temporal dev 本就内存态）
 #
 # 角色对齐 app/core/config.py：
-#   database_url       = postgresql+asyncpg://app:app@localhost:5432/xborder        （业务连接，受 RLS 约束）
-#   database_admin_url = postgresql+asyncpg://postgres:postgres@localhost:5432/xborder（超管，跑迁移/建策略）
+#   database_url       = postgresql+asyncpg://app:app@localhost:5433/xborder        （业务连接，受 RLS 约束）
+#   database_admin_url = postgresql+asyncpg://postgres:postgres@localhost:5433/xborder（超管，跑迁移/建策略）
+#   temporal_host      = localhost:7233                                              （worker/service 连它起 workflow）
 # zhparser（中文全文）本期不装；P2 上 PG 原生混合检索时再切自建镜像（方案 B）。
 services:
   db:
@@ -29,6 +30,21 @@ services:
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d xborder"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Temporal dev server（官方 CLI 镜像内置 server start-dev）：单容器自带前端 UI，
+  # 内存态、零外部依赖，专供本地开发/测试。生产用独立集群（auto-setup + 持久存储），别用这个。
+  # --ip/--ui-ip 绑 0.0.0.0 才能从宿主经映射端口连入。
+  temporal:
+    image: temporalio/temporal:latest   # 官方 multi-arch CLI/dev-server 镜像
+    command: server start-dev --ip 0.0.0.0 --ui-ip 0.0.0.0 --log-level warn
+    ports:
+      - "7233:7233"   # gRPC：worker / SourcingService 连这个起 CollectWorkflow
+      - "8233:8233"   # Web UI：http://localhost:8233
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address 127.0.0.1:7233 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
