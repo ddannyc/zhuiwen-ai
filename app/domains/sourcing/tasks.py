@@ -118,6 +118,15 @@ async def _process(repo: SourcingRepository, batch_id: str) -> dict:
     return result
 
 
+@queue_app.periodic(cron="* * * * *")
+@queue_app.task(name="sourcing.requeue_stale")
+async def requeue_stale_task(timestamp: int) -> None:
+    """每分钟兜底：重投掉队的后处理批（ADR-001 outbox）。逻辑见 cron.requeue_stale_pending。"""
+    from app.domains.sourcing.cron import requeue_stale_pending
+
+    await requeue_stale_pending()
+
+
 @queue_app.task(name="sourcing.post_process")
 async def post_process(batch_id: str, tenant_id: str) -> None:
     # 不在 tenant_session 内中途 commit：set_config(is_local) 是事务级，commit 会清掉

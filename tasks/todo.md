@@ -31,7 +31,8 @@
 - [x] **✅ C3**：全管线 fetch→评分→翻译→上架按 options 跑通，各段 mock 断言调用链
 
 ## Phase 4 — 可靠性
-- [ ] T4.1 cron 兜底 task：扫 pending 超 grace 重投（grace=2min/cron=1min 待确认）
+- [x] T4.1 cron 兜底 task：扫 pending/queued 超 grace(120s) 重投，cron 每分钟
+      （跨租户读用 admin 连接 bypass RLS；periodic 任务随 procrastinate worker 起，T5.1 后生效）
 - [ ] T4.2 幂等：CAS pending/queued→running；done 跳过；上架查重
 - [ ] **✅ C4**：worker kill→cron 重驱→done 且**只上架一次**
 

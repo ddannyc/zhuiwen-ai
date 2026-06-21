@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     miaoshou_select_py: str = "~/.openclaw/skills/zhuiwen-product-selection/scripts/select.py"
     miaoshou_app_key: str = ""
     miaoshou_app_secret: str = ""
+    # cron 兜底：扫 post_status pending/queued 且 updated_at 超此秒数未推进 → 重投（ADR-001）。
+    sourcing_requeue_grace_seconds: int = 120
 
     # --- 规则知识库 (rules_kb) ---
     # 本期最小实现读 jsonl 种子语料；后续换 Postgres+pgvector 时弃用。
