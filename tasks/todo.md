@@ -25,8 +25,8 @@
 - [x] **✅ C4**：浏览器真打字 + replace 呈现
 
 ## Phase 5 — 清理 + 测试硬化
-- [ ] T5.1 删 _chunk 假打字残留；全套 pytest + 前端 build
-- [ ] **✅ C5**：全绿；真流式唯一路径（降级除外）
+- [x] T5.1 删 _chunk 假打字残留；全套 pytest + 前端 build
+- [x] **✅ C5**：全绿；真流式唯一路径（降级除外）
 
 ## 待决
 - [x] 终答流式化 → **锁 B**（service 直调 chat_stream，agent prepare() 出 gen_messages）
