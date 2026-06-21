@@ -41,9 +41,10 @@ class Settings(BaseSettings):
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     # chat 需真实 DASHSCOPE_API_KEY（.env 配）。不提供 mock 端点。
 
-    # embeddings 仍走 OpenAI 兼容端点（knowledge_base 域用，本期未启用）
-    litellm_base_url: str = "http://localhost:4000"
-    litellm_master_key: str = "change-me"
+    # embeddings 与 chat 同源：经 litellm SDK 进程内调 DashScope（见 shared/llm/embeddings.py）。
+    # knowledge_base + rules_kb 域共用。v3 默认 1024 维，对齐 kb_chunks vector(1024)。
+    embedding_model: str = "text-embedding-v3"
+    embedding_dim: int = 1024
 
     # --- Temporal (sourcing 采集长流程) ---
     temporal_host: str = "localhost:7233"
