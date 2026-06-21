@@ -3,7 +3,52 @@
 平台运营规范知识库的**首批种子规则记录**。Schema 见 `docs/规则知识库设计.md` 第一部分（§1.1 字段、§1.2 `rule_domain` 受控词表、§1.3 confidence↔source 映射）。
 
 ## 文件
-- `seed_rules.jsonl` — 每行一条规则记录（rule record），字段与 schema §1.1 完全对齐。
+规则语料按平台拆分为 `*_rules.jsonl`（service 读 `data/rules_kb/` 目录时自动合并全部
+`*_rules.jsonl`，按 `rule_id` 去重；`*.process_*.jsonl` 等中间产物因后缀不匹配自动排除）。
+
+| 文件 | 平台 | 条数 | 来源/方法 |
+|---|---|---|---|
+| `ozon_rules.jsonl` | ozon | 299 | urllib 爬 docs.ozon.ru + LLM 抽取（2026-06-17） |
+| `ozon_web_rules.jsonl` | ozon | 22 | WebSearch 补采 docs.ozon.ru（2026-06-21） |
+| `amazon_rules.jsonl` | amazon | 28 | WebSearch 采 sellercentral（2026-06-21） |
+| `seed_rules.jsonl` | amazon | 7 | sell.amazon.com 帮助页（2026-06-17） |
+| `tiktok_rules.jsonl` | tiktok | 35 | WebSearch 采 seller-us.tiktok.com（2026-06-21） |
+| `temu_rules.jsonl` | temu | 30 | WebSearch 采 temu.com/seller.temu.com（2026-06-21） |
+| `shein_rules.jsonl` | shein | 28 | WebSearch 采 shein.com/sheingroup.com（2026-06-21） |
+| `mercadolibre_rules.jsonl` | mercadolibre | 32 | WebSearch 采 mercadolibre 官方 ayuda（2026-06-21） |
+
+另有 `{platform}_pw_rules.jsonl`（6 个文件，共 **43 条**）—— Playwright 真浏览器渲染
+公开政策页**一手**抽取（见下「2026-06-21 Playwright 批」）。
+
+合计 **524 条**，全部 `needs_review`。每行一条规则记录，字段与 schema §1.1 完全对齐。
+service 读目录时按 `*_rules.jsonl` 后缀合并全部文件（含 `_pw_rules.jsonl`），按 `rule_id` 去重。
+
+## 本批内容（2026-06-21）—— 6 平台扩充
+TikTok / Temu / SHEIN / Mercado Libre / Amazon（补充）/ Ozon（补充）共 **+175 条**。
+方法：harness `WebSearch` 拿官方政策实质 + 官方源 URL（平台帮助页多为 SPA，`WebFetch`
+直抓常返回登录壳/403，故主用 WebSearch）。覆盖全部 13 个受控 `rule_domain`。
+**高风险数值阈值**（佣金率、退货时限、账号健康指标、迟发率、结算周期等）多为 WebSearch
+二手概括，已统一标 `confidence=low` 且 `content` 注「待核验」，人工审核时优先逐条对照官方页。
+
+## 2026-06-21 Playwright 批 —— 一手全文采集（+43 条）
+用 Playwright MCP 真浏览器渲染各平台**公开政策页**（IP/退货/禁售/条款/促销/图片视频要求等），
+取 JS 渲染后的完整正文再抽取，故 confidence 多为 high（一手读到原文，含具体数值），
+但仍全部 `needs_review`。WebFetch/urllib 直抓这些 SPA 只得登录壳，Playwright 是唯一能拿全文的路径。
+
+| 平台 | 条数 | 渲染成功的公开页 |
+|---|---|---|
+| tiktok | 8 | seller-us.tiktok.com university 禁售/刊登页（**无需登录即全渲染**） |
+| shein | 9 | 退货政策 / IP 通知 / 使用条款 / 促销规则 |
+| temu | 8 | IP 政策 / 退换货政策 / 使用条款 |
+| mercadolibre | 7 | 禁售品 / 退货政策 / 如何刊登（西语原文） |
+| amazon | 6 | sell.amazon.com Project Zero / Transparency（sellercentral 需登录，未碰） |
+| ozon | 5 | global-help.ozon.com 出口受限/图片/视频要求（`?country=CN` 绕区域门控） |
+
+落地经验：
+- **登录墙**：TikTok Seller University 公开页可渲染；Amazon Seller Central、SHEIN supplier、ML 卖家后台深层页需登录，Playwright 无凭证只得壳——本批只采公开端。
+- **区域门控**：Ozon 文章正文按区域屏蔽，加 `?country=CN` 参数解除。
+- **反爬**：Ozon 首跳 antibot 挑战页，等渲染后正常。
+- 文件后缀 `_pw_rules.jsonl` 匹配 service 的 `*_rules.jsonl` glob，自动并入语料。
 
 ## 本批内容（2026-06-17）
 

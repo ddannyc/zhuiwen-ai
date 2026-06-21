@@ -3,8 +3,9 @@
 定位见 docs/chat-redesign-plan.md §6 与《规则知识库设计.md》：
 chat agent 的 rules_search 工具只调本 service，绝不直接读规则库表/文件。
 
-本期实现：读 data/rules_kb/ozon_rules.jsonl（299 条 needs_review 的 Ozon 规则），
-做 metadata 硬过滤（platform/site，杜绝串台）+ 中文 bigram 词法打分检索。
+本期实现：读 data/rules_kb/ 下全部 *_rules.jsonl（多平台 needs_review 规则语料：
+ozon/amazon/tiktok/temu/shein/mercadolibre…），做 metadata 硬过滤（platform/site，
+杜绝串台）+ 中文 bigram 词法打分检索。
 后续升级 Postgres + pgvector + BM25 混合检索时只换实现、不改签名（契约定死）。
 
 返回每条 hit 的字段（与 jsonl schema 对齐，chat agent _format_rules 依赖）：
@@ -62,6 +63,29 @@ def _load(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _load_corpus(path: Path) -> list[dict[str, Any]]:
+    """加载规则语料。
+
+    path 为目录：合并其下全部 *_rules.jsonl（多平台语料），靠 glob 后缀天然排除
+      *.process_*.jsonl / raw/ 等中间产物；按 rule_id 去重（防同条多文件重复）。
+    path 为单文件：只读该文件（向后兼容旧的单 jsonl 配置）。
+    每个文件独立走 _load 的 mtime 缓存，单文件改动只失效自身。
+    """
+    if path.is_dir():
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for fp in sorted(path.glob("*_rules.jsonl")):
+            for r in _load(fp):
+                rid = r.get("rule_id")
+                if rid and rid in seen:
+                    continue
+                if rid:
+                    seen.add(rid)
+                rows.append(r)
+        return rows
+    return _load(path)
+
+
 def _bigrams(s: str) -> set[str]:
     s = "".join(s.lower().split())
     return {s[i : i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else ({s} if s else set())
@@ -103,7 +127,7 @@ class RulesKbService:
         platform/site 做大小写无关的硬过滤 —— metadata 隔离是设计红线，
         查 amazon 绝不会串到 ozon 的规则；查不到就返回 []（上层据此回"不知道"）。
         """
-        rows = _load(_resolve_path(get_settings().rules_kb_path))
+        rows = _load_corpus(_resolve_path(get_settings().rules_kb_path))
 
         # 1) metadata 硬过滤（杜绝跨平台/跨站串台）
         if platform:

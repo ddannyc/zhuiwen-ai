@@ -1,7 +1,8 @@
-"""RulesKbService.search 溯源契约回归测试（读真实 299 条 jsonl，不 mock）。
+"""RulesKbService.search 溯源契约回归测试（读真实多平台 jsonl 语料，不 mock）。
 
 固化 docs/chat-redesign-plan.md §6 的硬约束：metadata 隔离 + 溯源字段 +
-空检索不编造。数据是 needs_review 的 Ozon 种子语料。
+空检索不编造。数据是 needs_review 的多平台种子语料
+（ozon/amazon/tiktok/temu/shein/mercadolibre，data/rules_kb/*_rules.jsonl）。
 """
 from app.domains.rules_kb.service import RulesKbService
 
@@ -19,9 +20,24 @@ async def test_ozon_hit_carries_sourcing():
     assert top["platform"] == "ozon"
 
 
-async def test_platform_isolation_amazon_empty():
-    # KB 只有 ozon，查 amazon 必须 0 命中（杜绝串台 → 触发"不知道"路径）
-    assert await svc.search("玩具类目能卖含磁铁的吗", platform="amazon") == []
+async def test_amazon_now_in_corpus():
+    # 多平台语料：amazon 已入库，相关查询应命中且 platform 严格隔离为 amazon
+    hits = await svc.search("账号健康指标 退货", platform="amazon")
+    assert hits, "Amazon 查询应命中（语料已含 amazon_rules + seed）"
+    assert all(h["platform"] == "amazon" for h in hits)
+    assert hits[0]["source_url"].startswith("https://")
+
+
+async def test_platform_isolation_absent_platform_empty():
+    # 查语料里不存在的平台必须 0 命中（杜绝串台 → 触发"不知道"路径）
+    assert await svc.search("玩具类目能卖含磁铁的吗", platform="ebay") == []
+
+
+async def test_multi_platform_isolation_no_crosstalk():
+    # 同一 query 在不同平台只返回各自平台的规则，绝不串台
+    for pf in ("ozon", "amazon", "tiktok", "temu", "shein", "mercadolibre"):
+        hits = await svc.search("禁售 商品", platform=pf)
+        assert all(h["platform"] == pf for h in hits), f"{pf} 串台"
 
 
 async def test_global_rules_match_any_site():

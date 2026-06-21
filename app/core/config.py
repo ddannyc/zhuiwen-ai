@@ -54,8 +54,11 @@ class Settings(BaseSettings):
     temporal_connect_timeout: float = 3.0
 
     # --- 规则知识库 (rules_kb) ---
-    # 本期最小实现读这个 jsonl 种子语料；后续换 Postgres+pgvector 时弃用。
-    rules_kb_path: str = "data/rules_kb/ozon_rules.jsonl"
+    # 本期最小实现读 jsonl 种子语料；后续换 Postgres+pgvector 时弃用。
+    # 指向目录时加载其下全部 *_rules.jsonl（多平台：ozon/amazon/tiktok/temu/
+    # shein/mercadolibre…），自动排除 *.process_*.jsonl 等中间产物；指向单文件
+    # 时只读该文件（向后兼容）。
+    rules_kb_path: str = "data/rules_kb"
 
     # --- 可观测 (Langfuse) ---
     langfuse_public_key: str = ""
